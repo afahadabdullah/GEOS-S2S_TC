@@ -33,8 +33,9 @@ umask 022
 
 FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_INIT_DATES_FILE="${SCRIPT_DIR%/scripts}/config/init_dates_late_aug_1999_2024.txt"
-INIT_DATES_FILE="${INIT_DATES_FILE:-${DEFAULT_INIT_DATES_FILE}}"
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+INIT_DATES_BASENAME="init_dates_late_aug_1999_2024.txt"
+INIT_DATES_FILE="${INIT_DATES_FILE:-}"
 
 REMOTE_HOST="${REMOTE_HOST:-lou}"
 REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
@@ -58,10 +59,32 @@ echo "DEST_ROOT=${DEST_ROOT}"
 echo "ENS=${ENS}"
 echo "COLLECTION=${COLLECTION}"
 echo "FILE_INTERVAL_TAG=${FILE_INTERVAL_TAG}"
-echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
+echo "SUBMIT_DIR=${SUBMIT_DIR}"
 echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
 
 mkdir -p "${DEST_ROOT}/GEOS_fcst"
+
+if [[ -d "${SUBMIT_DIR}" ]]; then
+  cd "${SUBMIT_DIR}"
+fi
+
+if [[ -z "${INIT_DATES_FILE}" ]]; then
+  init_date_candidates=(
+    "${SUBMIT_DIR}/config/${INIT_DATES_BASENAME}"
+    "${SUBMIT_DIR%/scripts}/config/${INIT_DATES_BASENAME}"
+    "${SCRIPT_DIR}/../config/${INIT_DATES_BASENAME}"
+    "${SCRIPT_DIR%/scripts}/config/${INIT_DATES_BASENAME}"
+  )
+
+  for candidate in "${init_date_candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      INIT_DATES_FILE="${candidate}"
+      break
+    fi
+  done
+fi
+
+echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
 
 if ! ssh -o BatchMode=yes "${REMOTE_HOST}" "echo connected" >/dev/null 2>&1; then
   echo "ERROR cannot connect to ${REMOTE_HOST} with batch ssh/scp."
@@ -71,6 +94,9 @@ fi
 
 if [[ ! -f "${INIT_DATES_FILE}" ]]; then
   echo "ERROR init-date file not found: ${INIT_DATES_FILE}"
+  echo "Checked relative to SUBMIT_DIR=${SUBMIT_DIR} and SCRIPT_DIR=${SCRIPT_DIR}"
+  echo "If needed, pass it explicitly with:"
+  echo "  qsub -v INIT_DATES_FILE=/full/path/to/${INIT_DATES_BASENAME} copy_geos_s2s3_ens1_sepnov.pbs"
   exit 3
 fi
 
