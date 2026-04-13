@@ -4,10 +4,10 @@
 #                     Batch Parameters for Run Job
 #######################################################################
 
-#PBS -l walltime=8:00:00
+#PBS -l walltime=120:00:00
 #PBS -l select=1:ncpus=40:mpiprocs=40:model=sky_ele
 #PBS -N geos_s2s3_atm6hr
-#PBS -q normal
+#PBS -q long
 #PBS -W group_list=s2406
 #PBS -j oe -k oed
 
