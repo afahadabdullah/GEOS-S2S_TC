@@ -1,0 +1,105 @@
+#!/bin/bash -l
+
+#######################################################################
+#                     Batch Parameters for Run Job
+#######################################################################
+
+#PBS -l walltime=8:00:00
+#PBS -l select=1:ncpus=40:mpiprocs=40:model=sky_ele
+#PBS -N geos_s2s3_atm6hr
+#PBS -q normal
+#PBS -W group_list=s2406
+#PBS -j oe -k oed
+
+# Wrapper for the resumable GEOS S2S3 pull job, specialized for:
+#   collection   = atm_inst_6hr_glo_L720x361_p49
+#   init dates   = late August, 1991-2024
+#   forecast     = Sep, Oct, Nov
+#   ensemble     = ens1
+#
+# Example submit from scripts/:
+#   qsub copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs
+#
+# Example explicit submit from repo root:
+#   qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,RESUBMIT_SCRIPT=/nobackupp27/afahad/project/GEOS-S2S_TC/scripts/copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs
+
+set -u
+umask 022
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+SCRIPT_BASENAME="$(basename "${BASH_SOURCE[0]}")"
+BASE_SCRIPT_NAME="copy_geos_s2s3_ens1_sepnov.pbs"
+INIT_DATES_BASENAME="init_dates_late_aug_1991_2024.txt"
+
+wrapper_candidates=(
+  "${SUBMIT_DIR}/${SCRIPT_BASENAME}"
+  "${SUBMIT_DIR}/scripts/${SCRIPT_BASENAME}"
+)
+
+base_script_candidates=(
+  "${SUBMIT_DIR}/${BASE_SCRIPT_NAME}"
+  "${SUBMIT_DIR}/scripts/${BASE_SCRIPT_NAME}"
+)
+
+init_date_candidates=(
+  "${SUBMIT_DIR}/config/${INIT_DATES_BASENAME}"
+  "${SUBMIT_DIR%/scripts}/config/${INIT_DATES_BASENAME}"
+)
+
+if [[ -z "${RESUBMIT_SCRIPT:-}" ]]; then
+  for candidate in "${wrapper_candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      RESUBMIT_SCRIPT="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [[ -z "${BASE_SCRIPT:-}" ]]; then
+  for candidate in "${base_script_candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      BASE_SCRIPT="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [[ -z "${INIT_DATES_FILE:-}" ]]; then
+  for candidate in "${init_date_candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      INIT_DATES_FILE="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [[ -z "${RESUBMIT_SCRIPT:-}" || ! -f "${RESUBMIT_SCRIPT}" ]]; then
+  echo "ERROR could not resolve RESUBMIT_SCRIPT for ${SCRIPT_BASENAME}"
+  exit 10
+fi
+
+if [[ -z "${BASE_SCRIPT:-}" || ! -f "${BASE_SCRIPT}" ]]; then
+  echo "ERROR could not resolve base script ${BASE_SCRIPT_NAME}"
+  exit 11
+fi
+
+if [[ -z "${INIT_DATES_FILE:-}" || ! -f "${INIT_DATES_FILE}" ]]; then
+  echo "ERROR could not resolve init-date file ${INIT_DATES_BASENAME}"
+  exit 12
+fi
+
+export REMOTE_HOST="${REMOTE_HOST:-lou}"
+export REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
+export DEST_ROOT="${DEST_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm}"
+
+export ENS="${ENS:-ens1}"
+export COLLECTION="${COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
+export FILE_INTERVAL_TAG="${FILE_INTERVAL_TAG:-daily}"
+export FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
+export ELAPSED_LIMIT_SECONDS="${ELAPSED_LIMIT_SECONDS:-26400}"
+export REMOVE_TAR_AFTER_EXTRACT="${REMOVE_TAR_AFTER_EXTRACT:-0}"
+
+export INIT_DATES_FILE
+export RESUBMIT_SCRIPT
+
+exec "${BASE_SCRIPT}"
