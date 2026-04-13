@@ -32,10 +32,12 @@ set -u
 umask 022
 
 FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
+ELAPSED_LIMIT_SECONDS="${ELAPSED_LIMIT_SECONDS:-26400}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
 INIT_DATES_BASENAME="init_dates_late_aug_1999_2024.txt"
 INIT_DATES_FILE="${INIT_DATES_FILE:-}"
+RESUBMIT_SCRIPT="${RESUBMIT_SCRIPT:-}"
 
 REMOTE_HOST="${REMOTE_HOST:-lou}"
 REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
@@ -61,6 +63,7 @@ echo "COLLECTION=${COLLECTION}"
 echo "FILE_INTERVAL_TAG=${FILE_INTERVAL_TAG}"
 echo "SUBMIT_DIR=${SUBMIT_DIR}"
 echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
+echo "ELAPSED_LIMIT_SECONDS=${ELAPSED_LIMIT_SECONDS}"
 
 mkdir -p "${DEST_ROOT}/GEOS_fcst"
 
@@ -86,6 +89,32 @@ fi
 
 echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
 
+script_basename="$(basename "${BASH_SOURCE[0]}")"
+
+if [[ -z "${RESUBMIT_SCRIPT}" ]]; then
+  resubmit_candidates=(
+    "${SUBMIT_DIR}/${script_basename}"
+    "${SUBMIT_DIR}/scripts/${script_basename}"
+    "${SCRIPT_DIR}/${script_basename}"
+  )
+
+  for candidate in "${resubmit_candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      RESUBMIT_SCRIPT="${candidate}"
+      break
+    fi
+  done
+fi
+
+echo "RESUBMIT_SCRIPT=${RESUBMIT_SCRIPT}"
+
+if [[ -z "${RESUBMIT_SCRIPT}" || ! -f "${RESUBMIT_SCRIPT}" ]]; then
+  echo "ERROR could not resolve the original script path for resubmission."
+  echo "Pass it explicitly with:"
+  echo "  qsub -v RESUBMIT_SCRIPT=/full/path/to/${script_basename} copy_geos_s2s3_ens1_sepnov.pbs"
+  exit 6
+fi
+
 if ! ssh -o BatchMode=yes "${REMOTE_HOST}" "echo connected" >/dev/null 2>&1; then
   echo "ERROR cannot connect to ${REMOTE_HOST} with batch ssh/scp."
   echo "Check that the compute node can reach ${REMOTE_HOST} and that ssh keys are set up."
@@ -107,61 +136,206 @@ if [[ "${#init_dates[@]}" -eq 0 ]]; then
   exit 4
 fi
 
-echo "INIT_DATE_COUNT=${#init_dates[@]}"
+read -r -a forecast_month_array <<< "${FORECAST_MONTHS}"
 
+if [[ "${#forecast_month_array[@]}" -eq 0 ]]; then
+  echo "ERROR no forecast months were provided."
+  exit 5
+fi
+
+forecast_months_tag="${FORECAST_MONTHS// /-}"
+init_dates_tag="$(basename "${INIT_DATES_FILE}")"
+init_dates_tag="${init_dates_tag%.*}"
+STATE_ROOT="${STATE_ROOT:-${DEST_ROOT}/job_state}"
+STATE_DIR="${STATE_DIR:-${STATE_ROOT}/${ENS}__${COLLECTION}__${FILE_INTERVAL_TAG}__${forecast_months_tag}__${init_dates_tag}}"
+PROGRESS_FILE="${PROGRESS_FILE:-${STATE_DIR}/progress.tsv}"
+NEXT_INDEX_FILE="${NEXT_INDEX_FILE:-${STATE_DIR}/next_index.txt}"
+COMPLETION_FILE="${COMPLETION_FILE:-${STATE_DIR}/completed.ok}"
+
+mkdir -p "${STATE_DIR}"
+rm -f "${COMPLETION_FILE}"
+
+record_progress() {
+  local status="$1"
+  printf "%s\t%s\t%s\t%s\t%s\n" \
+    "$(date '+%F %T')" "${item_index}" "${status}" "${init_date}" "${file_name}" >> "${PROGRESS_FILE}"
+}
+
+save_next_index() {
+  printf "%s\n" "$1" > "${NEXT_INDEX_FILE}"
+}
+
+elapsed_seconds() {
+  echo $(( $(date +%s) - run_start_epoch ))
+}
+
+resubmit_job() {
+  local new_job_id
+
+  if [[ -z "${RESUBMIT_SCRIPT}" || ! -f "${RESUBMIT_SCRIPT}" ]]; then
+    echo "ERROR cannot resubmit because RESUBMIT_SCRIPT is invalid: ${RESUBMIT_SCRIPT}"
+    return 1
+  fi
+
+  export INIT_DATES_FILE
+  export REMOTE_HOST REMOTE_ROOT DEST_ROOT
+  export ENS COLLECTION FILE_INTERVAL_TAG REMOVE_TAR_AFTER_EXTRACT
+  export FORECAST_MONTHS ELAPSED_LIMIT_SECONDS
+  export STATE_ROOT STATE_DIR PROGRESS_FILE NEXT_INDEX_FILE COMPLETION_FILE
+  export RESUBMIT_SCRIPT
+
+  if new_job_id=$(qsub -V "${RESUBMIT_SCRIPT}"); then
+    echo "Submitted continuation job: ${new_job_id}"
+    return 0
+  fi
+
+  echo "ERROR qsub resubmission failed for ${RESUBMIT_SCRIPT}"
+  return 1
+}
+
+total_items=$(( ${#init_dates[@]} * ${#forecast_month_array[@]} ))
+start_index=0
+start_index_source="default"
+
+if [[ -f "${NEXT_INDEX_FILE}" ]]; then
+  read -r saved_index < "${NEXT_INDEX_FILE}"
+  if [[ "${saved_index}" =~ ^[0-9]+$ ]]; then
+    start_index="${saved_index}"
+    start_index_source="saved_next_index"
+  fi
+else
+  bootstrap_index=0
+
+  for bootstrap_init_date in "${init_dates[@]}"; do
+    bootstrap_year="${bootstrap_init_date:0:4}"
+
+    for bootstrap_fcst_month in "${forecast_month_array[@]}"; do
+      bootstrap_yyyymm="${bootstrap_year}${bootstrap_fcst_month}"
+      bootstrap_file_name="${bootstrap_init_date}.${COLLECTION}.${FILE_INTERVAL_TAG}.${bootstrap_yyyymm}.nc4.tar"
+      bootstrap_local_dir="${DEST_ROOT}/GEOS_fcst/${bootstrap_init_date}/${ENS}/${COLLECTION}"
+      bootstrap_local_tar="${bootstrap_local_dir}/${bootstrap_file_name}"
+      bootstrap_extract_marker="${bootstrap_local_tar}.untar_done"
+
+      if [[ -f "${bootstrap_extract_marker}" ]]; then
+        bootstrap_index=$((bootstrap_index + 1))
+      else
+        break 2
+      fi
+    done
+  done
+
+  if (( bootstrap_index > 0 )); then
+    start_index="${bootstrap_index}"
+    start_index_source="bootstrap_from_extract_markers"
+    save_next_index "${start_index}"
+  fi
+fi
+
+if (( start_index >= total_items )); then
+  start_index=0
+  start_index_source="reset_to_zero"
+fi
+
+echo "INIT_DATE_COUNT=${#init_dates[@]}"
+echo "TOTAL_ITEMS=${total_items}"
+echo "STATE_DIR=${STATE_DIR}"
+echo "PROGRESS_FILE=${PROGRESS_FILE}"
+echo "NEXT_INDEX_FILE=${NEXT_INDEX_FILE}"
+echo "START_INDEX=${start_index}"
+echo "START_INDEX_SOURCE=${start_index_source}"
+
+run_start_epoch=$(date +%s)
+item_index=0
 for init_date in "${init_dates[@]}"; do
   init_year="${init_date:0:4}"
 
-  for fcst_month in ${FORECAST_MONTHS}; do
+  for fcst_month in "${forecast_month_array[@]}"; do
+    if (( item_index < start_index )); then
+      item_index=$((item_index + 1))
+      continue
+    fi
+
     yyyymm="${init_year}${fcst_month}"
     file_name="${init_date}.${COLLECTION}.${FILE_INTERVAL_TAG}.${yyyymm}.nc4.tar"
     remote_file="${REMOTE_ROOT}/${init_date}/${ENS}/${COLLECTION}/${file_name}"
     local_dir="${DEST_ROOT}/GEOS_fcst/${init_date}/${ENS}/${COLLECTION}"
     local_tar="${local_dir}/${file_name}"
     extract_marker="${local_tar}.untar_done"
+    next_index=$((item_index + 1))
 
     mkdir -p "${local_dir}"
 
     if [[ -f "${extract_marker}" ]]; then
       echo "SKIP extracted: ${local_tar}"
       skipped_count=$((skipped_count + 1))
-      continue
-    fi
-
-    if [[ ! -f "${local_tar}" ]]; then
-      if ssh -o BatchMode=yes "${REMOTE_HOST}" "test -f '${remote_file}'"; then
-        echo "COPY ${REMOTE_HOST}:${remote_file}"
-        if scp -p -o BatchMode=yes "${REMOTE_HOST}:${remote_file}" "${local_tar}"; then
-          copied_count=$((copied_count + 1))
+      record_progress "skip_extracted"
+      save_next_index "${next_index}"
+    else
+      if [[ ! -f "${local_tar}" ]]; then
+        if ssh -o BatchMode=yes "${REMOTE_HOST}" "test -f '${remote_file}'"; then
+          echo "COPY ${REMOTE_HOST}:${remote_file}"
+          if scp -p -o BatchMode=yes "${REMOTE_HOST}:${remote_file}" "${local_tar}"; then
+            copied_count=$((copied_count + 1))
+          else
+            echo "ERROR scp failed: ${REMOTE_HOST}:${remote_file}"
+            failed_count=$((failed_count + 1))
+            record_progress "copy_failed"
+            exit 1
+          fi
         else
-          echo "ERROR scp failed: ${REMOTE_HOST}:${remote_file}"
-          failed_count=$((failed_count + 1))
+          echo "MISSING ${REMOTE_HOST}:${remote_file}"
+          missing_count=$((missing_count + 1))
+          record_progress "missing_remote"
+          save_next_index "${next_index}"
+          item_index="${next_index}"
+
+          if (( next_index < total_items )) && (( $(elapsed_seconds) >= ELAPSED_LIMIT_SECONDS )); then
+            echo "Elapsed runtime exceeded ${ELAPSED_LIMIT_SECONDS}s after item ${item_index}/${total_items}."
+            if resubmit_job; then
+              exit 0
+            fi
+            exit 1
+          fi
+
           continue
         fi
       else
-        echo "MISSING ${REMOTE_HOST}:${remote_file}"
-        missing_count=$((missing_count + 1))
-        continue
+        echo "FOUND local tar: ${local_tar}"
       fi
-    else
-      echo "FOUND local tar: ${local_tar}"
+
+      echo "UNTAR ${local_tar}"
+      if tar -xf "${local_tar}" -C "${local_dir}"; then
+        touch "${extract_marker}"
+        extracted_count=$((extracted_count + 1))
+        record_progress "extracted"
+        save_next_index "${next_index}"
+
+        if [[ "${REMOVE_TAR_AFTER_EXTRACT}" == "1" ]]; then
+          rm -f "${local_tar}"
+        fi
+      else
+        echo "ERROR untar failed: ${local_tar}"
+        failed_count=$((failed_count + 1))
+        record_progress "untar_failed"
+        rm -f "${extract_marker}"
+        exit 1
+      fi
     fi
 
-    echo "UNTAR ${local_tar}"
-    if tar -xf "${local_tar}" -C "${local_dir}"; then
-      touch "${extract_marker}"
-      extracted_count=$((extracted_count + 1))
+    item_index="${next_index}"
 
-      if [[ "${REMOVE_TAR_AFTER_EXTRACT}" == "1" ]]; then
-        rm -f "${local_tar}"
+    if (( next_index < total_items )) && (( $(elapsed_seconds) >= ELAPSED_LIMIT_SECONDS )); then
+      echo "Elapsed runtime exceeded ${ELAPSED_LIMIT_SECONDS}s after item ${item_index}/${total_items}."
+      if resubmit_job; then
+        exit 0
       fi
-    else
-      echo "ERROR untar failed: ${local_tar}"
-      failed_count=$((failed_count + 1))
-      rm -f "${extract_marker}"
+      exit 1
     fi
   done
 done
+
+rm -f "${NEXT_INDEX_FILE}"
+touch "${COMPLETION_FILE}"
 
 echo "Job finished: $(date)"
 echo "Summary:"
