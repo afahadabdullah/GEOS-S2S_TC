@@ -1,0 +1,150 @@
+#!/bin/bash -l
+
+#######################################################################
+#                     Batch Parameters for Run Job
+#######################################################################
+
+#PBS -l walltime=8:00:00
+#PBS -l select=1:ncpus=40:mpiprocs=40:model=sky_ele
+#PBS -N geos_s2s3_pull
+#PBS -q normal
+#PBS -W group_list=s2406
+#PBS -j oe -k oed
+
+# Pull late-August GEOS S2S3 tar files for ens1, preserve the remote
+# directory layout under DEST_ROOT, and untar each monthly archive in place.
+#
+# Default file pattern matches:
+#   <init_date>.<collection>.daily.<YYYYMM>.nc4.tar
+#
+# Example submit:
+#   qsub copy_geos_s2s3_ens1_sepnov.pbs
+#
+# Example override for a different collection:
+#   qsub -v COLLECTION=inst6hr_3d_ana_Np,FILE_INTERVAL_TAG=inst \
+#        copy_geos_s2s3_ens1_sepnov.pbs
+#
+# Example override for a different init-date manifest:
+#   qsub -v INIT_DATES_FILE=/path/to/init_dates.txt \
+#        copy_geos_s2s3_ens1_sepnov.pbs
+
+set -u
+umask 022
+
+FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_INIT_DATES_FILE="${SCRIPT_DIR%/scripts}/config/init_dates_late_aug_1999_2024.txt"
+INIT_DATES_FILE="${INIT_DATES_FILE:-${DEFAULT_INIT_DATES_FILE}}"
+
+REMOTE_HOST="${REMOTE_HOST:-lou}"
+REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
+DEST_ROOT="${DEST_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm}"
+
+ENS="${ENS:-ens1}"
+COLLECTION="${COLLECTION:-sfc_tavg_3hr_glo_L720x361_sfc}"
+FILE_INTERVAL_TAG="${FILE_INTERVAL_TAG:-daily}"
+REMOVE_TAR_AFTER_EXTRACT="${REMOVE_TAR_AFTER_EXTRACT:-0}"
+
+copied_count=0
+extracted_count=0
+skipped_count=0
+missing_count=0
+failed_count=0
+
+echo "Job started: $(date)"
+echo "REMOTE_HOST=${REMOTE_HOST}"
+echo "REMOTE_ROOT=${REMOTE_ROOT}"
+echo "DEST_ROOT=${DEST_ROOT}"
+echo "ENS=${ENS}"
+echo "COLLECTION=${COLLECTION}"
+echo "FILE_INTERVAL_TAG=${FILE_INTERVAL_TAG}"
+echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
+echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
+
+mkdir -p "${DEST_ROOT}/GEOS_fcst"
+
+if ! ssh -o BatchMode=yes "${REMOTE_HOST}" "echo connected" >/dev/null 2>&1; then
+  echo "ERROR cannot connect to ${REMOTE_HOST} with batch ssh/scp."
+  echo "Check that the compute node can reach ${REMOTE_HOST} and that ssh keys are set up."
+  exit 2
+fi
+
+if [[ ! -f "${INIT_DATES_FILE}" ]]; then
+  echo "ERROR init-date file not found: ${INIT_DATES_FILE}"
+  exit 3
+fi
+
+mapfile -t init_dates < <(tr -s '[:space:]' '\n' < "${INIT_DATES_FILE}" | grep -E '^[0-9]{8}$')
+
+if [[ "${#init_dates[@]}" -eq 0 ]]; then
+  echo "ERROR no valid init dates found in ${INIT_DATES_FILE}"
+  exit 4
+fi
+
+echo "INIT_DATE_COUNT=${#init_dates[@]}"
+
+for init_date in "${init_dates[@]}"; do
+  init_year="${init_date:0:4}"
+
+  for fcst_month in ${FORECAST_MONTHS}; do
+    yyyymm="${init_year}${fcst_month}"
+    file_name="${init_date}.${COLLECTION}.${FILE_INTERVAL_TAG}.${yyyymm}.nc4.tar"
+    remote_file="${REMOTE_ROOT}/${init_date}/${ENS}/${COLLECTION}/${file_name}"
+    local_dir="${DEST_ROOT}/GEOS_fcst/${init_date}/${ENS}/${COLLECTION}"
+    local_tar="${local_dir}/${file_name}"
+    extract_marker="${local_tar}.untar_done"
+
+    mkdir -p "${local_dir}"
+
+    if [[ -f "${extract_marker}" ]]; then
+      echo "SKIP extracted: ${local_tar}"
+      skipped_count=$((skipped_count + 1))
+      continue
+    fi
+
+    if [[ ! -f "${local_tar}" ]]; then
+      if ssh -o BatchMode=yes "${REMOTE_HOST}" "test -f '${remote_file}'"; then
+        echo "COPY ${REMOTE_HOST}:${remote_file}"
+        if scp -p -o BatchMode=yes "${REMOTE_HOST}:${remote_file}" "${local_tar}"; then
+          copied_count=$((copied_count + 1))
+        else
+          echo "ERROR scp failed: ${REMOTE_HOST}:${remote_file}"
+          failed_count=$((failed_count + 1))
+          continue
+        fi
+      else
+        echo "MISSING ${REMOTE_HOST}:${remote_file}"
+        missing_count=$((missing_count + 1))
+        continue
+      fi
+    else
+      echo "FOUND local tar: ${local_tar}"
+    fi
+
+    echo "UNTAR ${local_tar}"
+    if tar -xf "${local_tar}" -C "${local_dir}"; then
+      touch "${extract_marker}"
+      extracted_count=$((extracted_count + 1))
+
+      if [[ "${REMOVE_TAR_AFTER_EXTRACT}" == "1" ]]; then
+        rm -f "${local_tar}"
+      fi
+    else
+      echo "ERROR untar failed: ${local_tar}"
+      failed_count=$((failed_count + 1))
+      rm -f "${extract_marker}"
+    fi
+  done
+done
+
+echo "Job finished: $(date)"
+echo "Summary:"
+echo "  copied=${copied_count}"
+echo "  extracted=${extracted_count}"
+echo "  skipped=${skipped_count}"
+echo "  missing=${missing_count}"
+echo "  failed=${failed_count}"
+
+if [[ "${failed_count}" -gt 0 ]]; then
+  exit 1
+fi
