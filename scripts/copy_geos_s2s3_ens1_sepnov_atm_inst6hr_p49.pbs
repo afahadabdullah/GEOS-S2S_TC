@@ -27,13 +27,13 @@ set -u
 umask 022
 
 SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
-SCRIPT_BASENAME="$(basename "${BASH_SOURCE[0]}")"
+WRAPPER_SCRIPT_NAME="copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs"
 BASE_SCRIPT_NAME="copy_geos_s2s3_ens1_sepnov.pbs"
 INIT_DATES_BASENAME="init_dates_late_aug_1991_2024.txt"
 
 wrapper_candidates=(
-  "${SUBMIT_DIR}/${SCRIPT_BASENAME}"
-  "${SUBMIT_DIR}/scripts/${SCRIPT_BASENAME}"
+  "${SUBMIT_DIR}/${WRAPPER_SCRIPT_NAME}"
+  "${SUBMIT_DIR}/scripts/${WRAPPER_SCRIPT_NAME}"
 )
 
 base_script_candidates=(
@@ -74,7 +74,9 @@ if [[ -z "${INIT_DATES_FILE:-}" ]]; then
 fi
 
 if [[ -z "${RESUBMIT_SCRIPT:-}" || ! -f "${RESUBMIT_SCRIPT}" ]]; then
-  echo "ERROR could not resolve RESUBMIT_SCRIPT for ${SCRIPT_BASENAME}"
+  echo "ERROR could not resolve RESUBMIT_SCRIPT for ${WRAPPER_SCRIPT_NAME}"
+  echo "Pass it explicitly with:"
+  echo "  qsub -v RESUBMIT_SCRIPT=/full/path/to/${WRAPPER_SCRIPT_NAME} ${WRAPPER_SCRIPT_NAME}"
   exit 10
 fi
 
