@@ -36,7 +36,7 @@ ELAPSED_LIMIT_SECONDS="${ELAPSED_LIMIT_SECONDS:-26400}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
 SCRIPT_NAME="copy_geos_s2s3_ens1_sepnov.pbs"
-INIT_DATES_BASENAME="init_dates_late_aug_1999_2024.txt"
+INIT_DATES_BASENAME="init_dates_late_aug_1991_2024.txt"
 INIT_DATES_FILE="${INIT_DATES_FILE:-}"
 RESUBMIT_SCRIPT="${RESUBMIT_SCRIPT:-}"
 
