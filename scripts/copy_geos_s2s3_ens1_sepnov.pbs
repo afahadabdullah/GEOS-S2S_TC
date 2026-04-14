@@ -152,6 +152,7 @@ init_dates_tag="${init_dates_tag%.*}"
 STATE_ROOT="${STATE_ROOT:-${DEST_ROOT}/job_state}"
 STATE_DIR="${STATE_DIR:-${STATE_ROOT}/${ENS}__${COLLECTION}__${FILE_INTERVAL_TAG}__${forecast_months_tag}__${init_dates_tag}}"
 PROGRESS_FILE="${PROGRESS_FILE:-${STATE_DIR}/progress.tsv}"
+RETRY_FILE="${RETRY_FILE:-${STATE_DIR}/retry.tsv}"
 NEXT_INDEX_FILE="${NEXT_INDEX_FILE:-${STATE_DIR}/next_index.txt}"
 COMPLETION_FILE="${COMPLETION_FILE:-${STATE_DIR}/completed.ok}"
 
@@ -162,6 +163,13 @@ record_progress() {
   local status="$1"
   printf "%s\t%s\t%s\t%s\t%s\n" \
     "$(date '+%F %T')" "${item_index}" "${status}" "${init_date}" "${file_name}" >> "${PROGRESS_FILE}"
+}
+
+record_retry() {
+  local status="$1"
+  local detail="$2"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$(date '+%F %T')" "${item_index}" "${status}" "${init_date}" "${file_name}" "${remote_file}" "${detail}" >> "${RETRY_FILE}"
 }
 
 save_next_index() {
@@ -184,7 +192,7 @@ resubmit_job() {
   export REMOTE_HOST REMOTE_ROOT DEST_ROOT
   export ENS COLLECTION FILE_INTERVAL_TAG REMOVE_TAR_AFTER_EXTRACT
   export FORECAST_MONTHS ELAPSED_LIMIT_SECONDS
-  export STATE_ROOT STATE_DIR PROGRESS_FILE NEXT_INDEX_FILE COMPLETION_FILE
+  export STATE_ROOT STATE_DIR PROGRESS_FILE RETRY_FILE NEXT_INDEX_FILE COMPLETION_FILE
   export RESUBMIT_SCRIPT
 
   if new_job_id=$(qsub -V "${RESUBMIT_SCRIPT}"); then
@@ -243,6 +251,7 @@ echo "INIT_DATE_COUNT=${#init_dates[@]}"
 echo "TOTAL_ITEMS=${total_items}"
 echo "STATE_DIR=${STATE_DIR}"
 echo "PROGRESS_FILE=${PROGRESS_FILE}"
+echo "RETRY_FILE=${RETRY_FILE}"
 echo "NEXT_INDEX_FILE=${NEXT_INDEX_FILE}"
 echo "START_INDEX=${start_index}"
 echo "START_INDEX_SOURCE=${start_index_source}"
@@ -283,7 +292,20 @@ for init_date in "${init_dates[@]}"; do
             echo "ERROR scp failed: ${REMOTE_HOST}:${remote_file}"
             failed_count=$((failed_count + 1))
             record_progress "copy_failed"
-            exit 1
+            record_retry "copy_failed" "scp returned non-zero status"
+            rm -f "${local_tar}"
+            save_next_index "${next_index}"
+            item_index="${next_index}"
+
+            if (( next_index < total_items )) && (( $(elapsed_seconds) >= ELAPSED_LIMIT_SECONDS )); then
+              echo "Elapsed runtime exceeded ${ELAPSED_LIMIT_SECONDS}s after item ${item_index}/${total_items}."
+              if resubmit_job; then
+                exit 0
+              fi
+              exit 1
+            fi
+
+            continue
           fi
         else
           echo "MISSING ${REMOTE_HOST}:${remote_file}"
@@ -320,8 +342,20 @@ for init_date in "${init_dates[@]}"; do
         echo "ERROR untar failed: ${local_tar}"
         failed_count=$((failed_count + 1))
         record_progress "untar_failed"
+        record_retry "untar_failed" "tar extraction returned non-zero status"
         rm -f "${extract_marker}"
-        exit 1
+        save_next_index "${next_index}"
+        item_index="${next_index}"
+
+        if (( next_index < total_items )) && (( $(elapsed_seconds) >= ELAPSED_LIMIT_SECONDS )); then
+          echo "Elapsed runtime exceeded ${ELAPSED_LIMIT_SECONDS}s after item ${item_index}/${total_items}."
+          if resubmit_job; then
+            exit 0
+          fi
+          exit 1
+        fi
+
+        continue
       fi
     fi
 
@@ -347,7 +381,4 @@ echo "  extracted=${extracted_count}"
 echo "  skipped=${skipped_count}"
 echo "  missing=${missing_count}"
 echo "  failed=${failed_count}"
-
-if [[ "${failed_count}" -gt 0 ]]; then
-  exit 1
-fi
+echo "  retry_file=${RETRY_FILE}"
