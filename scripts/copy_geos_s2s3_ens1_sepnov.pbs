@@ -35,6 +35,7 @@ FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
 ELAPSED_LIMIT_SECONDS="${ELAPSED_LIMIT_SECONDS:-26400}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+SCRIPT_NAME="copy_geos_s2s3_ens1_sepnov.pbs"
 INIT_DATES_BASENAME="init_dates_late_aug_1999_2024.txt"
 INIT_DATES_FILE="${INIT_DATES_FILE:-}"
 RESUBMIT_SCRIPT="${RESUBMIT_SCRIPT:-}"
@@ -89,13 +90,15 @@ fi
 
 echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
 
-script_basename="$(basename "${BASH_SOURCE[0]}")"
+if [[ "${RESUBMIT_SCRIPT}" == /var/spool/pbs/* ]]; then
+  echo "Ignoring spool-based RESUBMIT_SCRIPT=${RESUBMIT_SCRIPT}"
+  RESUBMIT_SCRIPT=""
+fi
 
-if [[ -z "${RESUBMIT_SCRIPT}" ]]; then
+if [[ -z "${RESUBMIT_SCRIPT}" || ! -f "${RESUBMIT_SCRIPT}" ]]; then
   resubmit_candidates=(
-    "${SUBMIT_DIR}/${script_basename}"
-    "${SUBMIT_DIR}/scripts/${script_basename}"
-    "${SCRIPT_DIR}/${script_basename}"
+    "${SUBMIT_DIR}/${SCRIPT_NAME}"
+    "${SUBMIT_DIR}/scripts/${SCRIPT_NAME}"
   )
 
   for candidate in "${resubmit_candidates[@]}"; do
@@ -111,7 +114,7 @@ echo "RESUBMIT_SCRIPT=${RESUBMIT_SCRIPT}"
 if [[ -z "${RESUBMIT_SCRIPT}" || ! -f "${RESUBMIT_SCRIPT}" ]]; then
   echo "ERROR could not resolve the original script path for resubmission."
   echo "Pass it explicitly with:"
-  echo "  qsub -v RESUBMIT_SCRIPT=/full/path/to/${script_basename} copy_geos_s2s3_ens1_sepnov.pbs"
+  echo "  qsub -v RESUBMIT_SCRIPT=/full/path/to/${SCRIPT_NAME} ${SCRIPT_NAME}"
   exit 6
 fi
 
