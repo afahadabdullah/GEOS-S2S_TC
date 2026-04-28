@@ -1,0 +1,200 @@
+#!/bin/bash -l
+
+#######################################################################
+#                     Batch Parameters for Run Job
+#######################################################################
+
+#PBS -l walltime=8:00:00
+#PBS -l select=1:ncpus=1:model=sky_ele
+#PBS -N geos_s2s3_shiftc
+#PBS -q normal
+#PBS -W group_list=s2406
+#PBS -j oe -k oed
+
+# Queue background shiftc transfers for both SFC and ATM collections,
+# for all available ensembles, using late-August init dates and only
+# Sep/Oct/Nov forecast tar files.
+#
+# Example submit from the repo root:
+#   qsub scripts/submit_shiftc_pull_son_allens.pbs
+#
+# Example explicit submit:
+#   qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,TARGET_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_pull_son_allens.pbs
+
+set -u
+umask 022
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+INIT_DATES_BASENAME="init_dates_late_aug_1991_2024.txt"
+INIT_DATES_FILE="${INIT_DATES_FILE:-}"
+
+REMOTE_HOST="${REMOTE_HOST:-lfe6}"
+REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
+TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
+
+FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
+FILE_INTERVAL_TAG="${FILE_INTERVAL_TAG:-daily}"
+COLLECTIONS=(
+  "sfc_tavg_3hr_glo_L720x361_sfc"
+  "atm_inst_6hr_glo_L720x361_p49"
+)
+
+QUEUE_LOG="${QUEUE_LOG:-${TARGET_ROOT}/shiftc_queue.tsv}"
+MISSING_LOG="${MISSING_LOG:-${TARGET_ROOT}/shiftc_missing.tsv}"
+ERROR_LOG="${ERROR_LOG:-${TARGET_ROOT}/shiftc_errors.tsv}"
+
+queued_count=0
+skipped_count=0
+missing_count=0
+error_count=0
+no_ens_count=0
+
+echo "Job started: $(date)"
+echo "REMOTE_HOST=${REMOTE_HOST}"
+echo "REMOTE_ROOT=${REMOTE_ROOT}"
+echo "TARGET_ROOT=${TARGET_ROOT}"
+echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
+echo "FILE_INTERVAL_TAG=${FILE_INTERVAL_TAG}"
+echo "SUBMIT_DIR=${SUBMIT_DIR}"
+
+mkdir -p "${TARGET_ROOT}/GEOS_fcst"
+
+if [[ -d "${SUBMIT_DIR}" ]]; then
+  cd "${SUBMIT_DIR}"
+fi
+
+if [[ -z "${INIT_DATES_FILE}" ]]; then
+  init_date_candidates=(
+    "${SUBMIT_DIR}/config/${INIT_DATES_BASENAME}"
+    "${SUBMIT_DIR%/scripts}/config/${INIT_DATES_BASENAME}"
+  )
+
+  for candidate in "${init_date_candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      INIT_DATES_FILE="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [[ ! -f "${INIT_DATES_FILE}" ]]; then
+  echo "ERROR could not resolve init-date file ${INIT_DATES_BASENAME}"
+  exit 2
+fi
+
+if ! command -v sup >/dev/null 2>&1; then
+  echo "ERROR 'sup' command is not available in this environment."
+  exit 3
+fi
+
+mapfile -t init_dates < <(tr -s '[:space:]' '\n' < "${INIT_DATES_FILE}" | grep -E '^[0-9]{8}$')
+read -r -a forecast_month_array <<< "${FORECAST_MONTHS}"
+
+if [[ "${#init_dates[@]}" -eq 0 ]]; then
+  echo "ERROR no init dates found in ${INIT_DATES_FILE}"
+  exit 4
+fi
+
+if [[ "${#forecast_month_array[@]}" -eq 0 ]]; then
+  echo "ERROR no forecast months configured"
+  exit 5
+fi
+
+list_remote_ensembles() {
+  local init_dir="$1"
+  ssh -o BatchMode=yes "${REMOTE_HOST}" \
+    "if [ -d '${init_dir}' ]; then find '${init_dir}' -mindepth 1 -maxdepth 1 -type d -name 'ens*' -exec basename {} \; | sort; fi"
+}
+
+remote_file_exists() {
+  local remote_file="$1"
+  ssh -o BatchMode=yes "${REMOTE_HOST}" "test -f '${remote_file}'"
+}
+
+for init_date in "${init_dates[@]}"; do
+  init_year="${init_date:0:4}"
+  remote_init_dir="${REMOTE_ROOT}/${init_date}"
+
+  ens_output="$(list_remote_ensembles "${remote_init_dir}")"
+  ens_status=$?
+
+  if (( ens_status != 0 )); then
+    echo "ERROR could not list ensembles for ${remote_init_dir}"
+    printf "%s\t%s\t%s\n" "$(date '+%F %T')" "list_ensembles_failed" "${remote_init_dir}" >> "${ERROR_LOG}"
+    exit 6
+  fi
+
+  if [[ -z "${ens_output}" ]]; then
+    echo "NO_ENS ${remote_init_dir}"
+    no_ens_count=$((no_ens_count + 1))
+    continue
+  fi
+
+  mapfile -t ens_dirs <<< "${ens_output}"
+
+  for ens in "${ens_dirs[@]}"; do
+    for collection in "${COLLECTIONS[@]}"; do
+      local_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}/${ens}/${collection}"
+      mkdir -p "${local_dir}"
+
+      for fcst_month in "${forecast_month_array[@]}"; do
+        yyyymm="${init_year}${fcst_month}"
+        file_name="${init_date}.${collection}.${FILE_INTERVAL_TAG}.${yyyymm}.nc4.tar"
+        remote_file="${REMOTE_ROOT}/${init_date}/${ens}/${collection}/${file_name}"
+        local_tar="${local_dir}/${file_name}"
+        submitted_marker="${local_tar}.shiftc_submitted"
+        extracted_marker="${local_tar}.untar_done"
+
+        if [[ -f "${local_tar}" ]]; then
+          rm -f "${submitted_marker}"
+          echo "SKIP present: ${local_tar}"
+          skipped_count=$((skipped_count + 1))
+          continue
+        fi
+
+        if [[ -f "${submitted_marker}" || -f "${extracted_marker}" ]]; then
+          echo "SKIP queued_or_done: ${local_tar}"
+          skipped_count=$((skipped_count + 1))
+          continue
+        fi
+
+        remote_file_exists "${remote_file}"
+        file_status=$?
+
+        if (( file_status == 0 )); then
+          echo "QUEUE sup shiftc ${REMOTE_HOST}:${remote_file} ${local_dir}/"
+          if sup shiftc "${REMOTE_HOST}:${remote_file}" "${local_dir}/"; then
+            touch "${submitted_marker}"
+            queued_count=$((queued_count + 1))
+            printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+              "$(date '+%F %T')" "${init_date}" "${ens}" "${collection}" "${file_name}" "${local_dir}" >> "${QUEUE_LOG}"
+          else
+            echo "ERROR shiftc submit failed: ${REMOTE_HOST}:${remote_file}"
+            error_count=$((error_count + 1))
+            printf "%s\t%s\t%s\n" "$(date '+%F %T')" "shiftc_submit_failed" "${remote_file}" >> "${ERROR_LOG}"
+          fi
+        elif (( file_status == 1 )); then
+          echo "MISSING ${REMOTE_HOST}:${remote_file}"
+          missing_count=$((missing_count + 1))
+          printf "%s\t%s\t%s\t%s\t%s\n" \
+            "$(date '+%F %T')" "${init_date}" "${ens}" "${collection}" "${file_name}" >> "${MISSING_LOG}"
+        else
+          echo "ERROR could not check ${REMOTE_HOST}:${remote_file}"
+          error_count=$((error_count + 1))
+          printf "%s\t%s\t%s\n" "$(date '+%F %T')" "remote_check_failed" "${remote_file}" >> "${ERROR_LOG}"
+        fi
+      done
+    done
+  done
+done
+
+echo "Job finished: $(date)"
+echo "Summary:"
+echo "  queued=${queued_count}"
+echo "  skipped=${skipped_count}"
+echo "  missing=${missing_count}"
+echo "  errors=${error_count}"
+echo "  no_ens=${no_ens_count}"
+echo "  queue_log=${QUEUE_LOG}"
+echo "  missing_log=${MISSING_LOG}"
+echo "  error_log=${ERROR_LOG}"
