@@ -1,0 +1,310 @@
+#!/bin/bash -l
+
+#######################################################################
+#                     Batch Parameters for Run Job
+#######################################################################
+
+#PBS -l walltime=120:00:00
+#PBS -l select=1:ncpus=1:model=sky_ele
+#PBS -N geos_sfc_untar
+#PBS -q long
+#PBS -W group_list=s2406
+#PBS -j oe -k oed
+
+# Untar locally available SFC forecast tar files into a fresh target tree
+# while preserving the source layout:
+#   GEOS_fcst/<init_date>/<ens>/<collection>/
+#
+# Defaults:
+# - late-August init dates from 1991-2024
+# - all available ens* directories
+# - SFC collection only
+# - two forecast months: Sep and Oct
+# - long-queue resumable execution
+#
+# Example submit:
+#   qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,RESUBMIT_SCRIPT=/nobackupp27/afahad/project/GEOS-S2S_TC/scripts/untar_local_sfc_late_aug_allens.pbs /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/untar_local_sfc_late_aug_allens.pbs
+
+set -u
+umask 022
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+SCRIPT_NAME="untar_local_sfc_late_aug_allens.pbs"
+INIT_DATES_BASENAME="init_dates_late_aug_1991_2024.txt"
+INIT_DATES_FILE="${INIT_DATES_FILE:-}"
+RESUBMIT_SCRIPT="${RESUBMIT_SCRIPT:-}"
+
+SOURCE_ROOT="${SOURCE_ROOT:-/nobackupp28/knakada/GEOSS2S3/GEOS_fcst}"
+TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
+
+COLLECTION="${COLLECTION:-sfc_tavg_3hr_glo_L720x361_sfc}"
+FILE_INTERVAL_TAG="${FILE_INTERVAL_TAG:-daily}"
+FORECAST_MONTHS="${FORECAST_MONTHS:-09 10}"
+ELAPSED_LIMIT_SECONDS="${ELAPSED_LIMIT_SECONDS:-414000}"
+
+extracted_count=0
+skipped_count=0
+missing_count=0
+failed_count=0
+no_init_count=0
+no_ens_count=0
+
+echo "Job started: $(date)"
+echo "SOURCE_ROOT=${SOURCE_ROOT}"
+echo "TARGET_ROOT=${TARGET_ROOT}"
+echo "COLLECTION=${COLLECTION}"
+echo "FILE_INTERVAL_TAG=${FILE_INTERVAL_TAG}"
+echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
+echo "ELAPSED_LIMIT_SECONDS=${ELAPSED_LIMIT_SECONDS}"
+echo "SUBMIT_DIR=${SUBMIT_DIR}"
+
+mkdir -p "${TARGET_ROOT}/GEOS_fcst"
+
+if [[ -d "${SUBMIT_DIR}" ]]; then
+  cd "${SUBMIT_DIR}"
+fi
+
+if [[ -z "${INIT_DATES_FILE}" ]]; then
+  init_date_candidates=(
+    "${SUBMIT_DIR}/config/${INIT_DATES_BASENAME}"
+    "${SUBMIT_DIR%/scripts}/config/${INIT_DATES_BASENAME}"
+  )
+
+  for candidate in "${init_date_candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      INIT_DATES_FILE="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [[ ! -f "${INIT_DATES_FILE}" ]]; then
+  echo "ERROR could not resolve init-date file ${INIT_DATES_BASENAME}"
+  exit 2
+fi
+
+if [[ "${RESUBMIT_SCRIPT}" == /var/spool/pbs/* ]]; then
+  echo "Ignoring spool-based RESUBMIT_SCRIPT=${RESUBMIT_SCRIPT}"
+  RESUBMIT_SCRIPT=""
+fi
+
+if [[ -z "${RESUBMIT_SCRIPT}" || ! -f "${RESUBMIT_SCRIPT}" ]]; then
+  resubmit_candidates=(
+    "${SUBMIT_DIR}/${SCRIPT_NAME}"
+    "${SUBMIT_DIR}/scripts/${SCRIPT_NAME}"
+  )
+
+  for candidate in "${resubmit_candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      RESUBMIT_SCRIPT="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [[ -z "${RESUBMIT_SCRIPT}" || ! -f "${RESUBMIT_SCRIPT}" ]]; then
+  echo "ERROR could not resolve RESUBMIT_SCRIPT for ${SCRIPT_NAME}"
+  exit 3
+fi
+
+mapfile -t init_dates < <(tr -s '[:space:]' '\n' < "${INIT_DATES_FILE}" | grep -E '^[0-9]{8}$')
+read -r -a forecast_month_array <<< "${FORECAST_MONTHS}"
+
+if [[ "${#init_dates[@]}" -eq 0 ]]; then
+  echo "ERROR no init dates found in ${INIT_DATES_FILE}"
+  exit 4
+fi
+
+if [[ "${#forecast_month_array[@]}" -eq 0 ]]; then
+  echo "ERROR no forecast months configured"
+  exit 5
+fi
+
+forecast_months_tag="${FORECAST_MONTHS// /-}"
+init_dates_tag="$(basename "${INIT_DATES_FILE}")"
+init_dates_tag="${init_dates_tag%.*}"
+STATE_ROOT="${STATE_ROOT:-${TARGET_ROOT}/job_state}"
+STATE_DIR="${STATE_DIR:-${STATE_ROOT}/untar_local_sfc__${forecast_months_tag}__${init_dates_tag}}"
+PROGRESS_FILE="${PROGRESS_FILE:-${STATE_DIR}/progress.tsv}"
+RETRY_FILE="${RETRY_FILE:-${STATE_DIR}/retry.tsv}"
+NEXT_INDEX_FILE="${NEXT_INDEX_FILE:-${STATE_DIR}/next_index.txt}"
+COMPLETION_FILE="${COMPLETION_FILE:-${STATE_DIR}/completed.ok}"
+
+mkdir -p "${STATE_DIR}"
+rm -f "${COMPLETION_FILE}"
+
+record_progress() {
+  local status="$1"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$(date '+%F %T')" "${item_index}" "${status}" "${init_date}" "${ens}" "${file_name}" >> "${PROGRESS_FILE}"
+}
+
+record_retry() {
+  local status="$1"
+  local detail="$2"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$(date '+%F %T')" "${item_index}" "${status}" "${init_date}" "${ens}" "${file_name}" "${detail}" >> "${RETRY_FILE}"
+}
+
+save_next_index() {
+  printf "%s\n" "$1" > "${NEXT_INDEX_FILE}"
+}
+
+elapsed_seconds() {
+  echo $(( $(date +%s) - run_start_epoch ))
+}
+
+resubmit_job() {
+  local new_job_id
+
+  export INIT_DATES_FILE RESUBMIT_SCRIPT
+  export SOURCE_ROOT TARGET_ROOT
+  export COLLECTION FILE_INTERVAL_TAG FORECAST_MONTHS ELAPSED_LIMIT_SECONDS
+  export STATE_ROOT STATE_DIR PROGRESS_FILE RETRY_FILE NEXT_INDEX_FILE COMPLETION_FILE
+
+  if new_job_id=$(qsub -V "${RESUBMIT_SCRIPT}"); then
+    echo "Submitted continuation job: ${new_job_id}"
+    return 0
+  fi
+
+  echo "ERROR qsub resubmission failed for ${RESUBMIT_SCRIPT}"
+  return 1
+}
+
+items=()
+
+for init_date in "${init_dates[@]}"; do
+  source_init_dir="${SOURCE_ROOT}/${init_date}"
+
+  if [[ ! -d "${source_init_dir}" ]]; then
+    echo "NO_INIT ${source_init_dir}"
+    no_init_count=$((no_init_count + 1))
+    continue
+  fi
+
+  mapfile -t ens_dirs < <(find "${source_init_dir}" -mindepth 1 -maxdepth 1 -type d -name 'ens*' -exec basename {} \; | sort)
+
+  if [[ "${#ens_dirs[@]}" -eq 0 ]]; then
+    echo "NO_ENS ${source_init_dir}"
+    no_ens_count=$((no_ens_count + 1))
+    continue
+  fi
+
+  init_year="${init_date:0:4}"
+
+  for ens in "${ens_dirs[@]}"; do
+    for fcst_month in "${forecast_month_array[@]}"; do
+      yyyymm="${init_year}${fcst_month}"
+      file_name="${init_date}.${COLLECTION}.${FILE_INTERVAL_TAG}.${yyyymm}.nc4.tar"
+      source_tar="${SOURCE_ROOT}/${init_date}/${ens}/${COLLECTION}/${file_name}"
+      target_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}/${ens}/${COLLECTION}"
+      extract_marker="${target_dir}/${file_name}.untar_done"
+      items+=("${init_date}|${ens}|${file_name}|${source_tar}|${target_dir}|${extract_marker}")
+    done
+  done
+done
+
+total_items="${#items[@]}"
+start_index=0
+start_index_source="default"
+
+if (( total_items == 0 )); then
+  echo "ERROR no untar work items were discovered."
+  exit 6
+fi
+
+if [[ -f "${NEXT_INDEX_FILE}" ]]; then
+  read -r saved_index < "${NEXT_INDEX_FILE}"
+  if [[ "${saved_index}" =~ ^[0-9]+$ ]]; then
+    start_index="${saved_index}"
+    start_index_source="saved_next_index"
+  fi
+else
+  bootstrap_index=0
+
+  for item in "${items[@]}"; do
+    IFS='|' read -r _init _ens _file _source _target_dir _marker <<< "${item}"
+    if [[ -f "${_marker}" ]]; then
+      bootstrap_index=$((bootstrap_index + 1))
+    else
+      break
+    fi
+  done
+
+  if (( bootstrap_index > 0 )); then
+    start_index="${bootstrap_index}"
+    start_index_source="bootstrap_from_extract_markers"
+    save_next_index "${start_index}"
+  fi
+fi
+
+if (( start_index >= total_items )); then
+  start_index=0
+  start_index_source="reset_to_zero"
+fi
+
+echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
+echo "TOTAL_ITEMS=${total_items}"
+echo "STATE_DIR=${STATE_DIR}"
+echo "PROGRESS_FILE=${PROGRESS_FILE}"
+echo "RETRY_FILE=${RETRY_FILE}"
+echo "NEXT_INDEX_FILE=${NEXT_INDEX_FILE}"
+echo "START_INDEX=${start_index}"
+echo "START_INDEX_SOURCE=${start_index_source}"
+
+run_start_epoch=$(date +%s)
+
+for (( item_index=start_index; item_index<total_items; item_index++ )); do
+  IFS='|' read -r init_date ens file_name source_tar target_dir extract_marker <<< "${items[item_index]}"
+  next_index=$((item_index + 1))
+
+  mkdir -p "${target_dir}"
+
+  if [[ -f "${extract_marker}" ]]; then
+    echo "SKIP extracted: ${target_dir}/${file_name}"
+    skipped_count=$((skipped_count + 1))
+    record_progress "skip_extracted"
+    save_next_index "${next_index}"
+  elif [[ ! -f "${source_tar}" ]]; then
+    echo "MISSING ${source_tar}"
+    missing_count=$((missing_count + 1))
+    record_progress "missing_source"
+    save_next_index "${next_index}"
+  else
+    echo "UNTAR ${source_tar} -> ${target_dir}"
+    if tar -xf "${source_tar}" -C "${target_dir}"; then
+      touch "${extract_marker}"
+      extracted_count=$((extracted_count + 1))
+      record_progress "extracted"
+      save_next_index "${next_index}"
+    else
+      echo "ERROR untar failed: ${source_tar}"
+      failed_count=$((failed_count + 1))
+      record_progress "untar_failed"
+      record_retry "untar_failed" "${source_tar}"
+      rm -f "${extract_marker}"
+      save_next_index "${next_index}"
+    fi
+  fi
+
+  if (( next_index < total_items )) && (( $(elapsed_seconds) >= ELAPSED_LIMIT_SECONDS )); then
+    echo "Elapsed runtime exceeded ${ELAPSED_LIMIT_SECONDS}s after item ${next_index}/${total_items}."
+    if resubmit_job; then
+      exit 0
+    fi
+    exit 1
+  fi
+done
+
+rm -f "${NEXT_INDEX_FILE}"
+touch "${COMPLETION_FILE}"
+
+echo "Job finished: $(date)"
+echo "Summary:"
+echo "  extracted=${extracted_count}"
+echo "  skipped=${skipped_count}"
+echo "  missing=${missing_count}"
+echo "  failed=${failed_count}"
+echo "  no_init=${no_init_count}"
+echo "  no_ens=${no_ens_count}"
+echo "  retry_file=${RETRY_FILE}"
