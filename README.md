@@ -19,7 +19,12 @@ GEOS-S2S_TC/
 |   `-- init_dates_late_aug_1999_2024.txt
 |-- scripts/
 |   |-- copy_geos_s2s3_ens1_sepnov.pbs
-|   `-- copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs
+|   |-- copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs
+|   |-- audit_atm_vs_sfc_progress.sh
+|   |-- submit_shiftc_atm_from_sfc_missing.pbs
+|   |-- submit_shiftc_pull_son_allens.pbs
+|   |-- untar_local_sfc_late_aug_allens.pbs
+|   `-- move_project_data_to_geoss2s3_atm.sh
 `-- README.md
 ```
 
@@ -37,6 +42,14 @@ Downloaded files are stored under:
 ```text
 /nobackupp27/afahad/GEOSS2S3_atm/GEOS_fcst/<init_date>/ens1/<collection>/
 ```
+
+The unified processing root is:
+
+```text
+/nobackupp27/afahad/GEOSS2S3_atm
+```
+
+All newer audit, shiftc-resume, and local-untar scripts default to this root.
 
 ## Available PBS Jobs
 
@@ -100,6 +113,26 @@ qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_date
 
 ```bash
 qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,RESUBMIT_SCRIPT=/nobackupp27/afahad/project/GEOS-S2S_TC/scripts/copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs
+```
+
+Move any files that were previously staged under the repo-local data tree into
+the unified processing root:
+
+```bash
+DRY_RUN=1 bash scripts/move_project_data_to_geoss2s3_atm.sh
+bash scripts/move_project_data_to_geoss2s3_atm.sh
+```
+
+Audit ATM coverage against the local SFC tree:
+
+```bash
+bash scripts/audit_atm_vs_sfc_progress.sh
+```
+
+Resume missing ATM transfers with shiftc:
+
+```bash
+qsub -v TARGET_ROOT=/nobackupp27/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_atm_from_sfc_missing.pbs
 ```
 
 ## Notes

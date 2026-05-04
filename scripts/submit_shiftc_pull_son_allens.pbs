@@ -19,7 +19,7 @@
 #   qsub scripts/submit_shiftc_pull_son_allens.pbs
 #
 # Example explicit submit:
-#   qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,TARGET_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_pull_son_allens.pbs
+#   qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,TARGET_ROOT=/nobackupp27/afahad/GEOSS2S3_atm /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_pull_son_allens.pbs
 
 set -u
 umask 022
@@ -30,7 +30,7 @@ INIT_DATES_FILE="${INIT_DATES_FILE:-}"
 
 REMOTE_HOST="${REMOTE_HOST:-lfe6}"
 REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
-TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
+TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm}"
 
 FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
 FILE_INTERVAL_TAG="${FILE_INTERVAL_TAG:-daily}"
