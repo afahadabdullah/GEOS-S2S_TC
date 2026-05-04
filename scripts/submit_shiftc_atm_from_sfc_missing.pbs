@@ -11,12 +11,14 @@
 #PBS -W group_list=s2406
 #PBS -j oe -k oed
 
-# Queue ATM shiftc transfers using the local SFC tree as the expected
-# init/ensemble/month universe. This avoids remote ensemble discovery and only
-# calls `sup shiftc` for ATM files missing locally.
+# Queue ATM shiftc transfers from a NAS PFE/login shell using the local SFC
+# tree as the expected init/ensemble/month universe. This avoids remote
+# ensemble discovery and only calls `shiftc` for ATM files missing locally.
 #
-# Example:
-#   qsub -v SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data,ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_atm_from_sfc_missing.pbs
+# Run this directly on PFE; do not qsub to a compute node.
+#
+# Example from the repo root:
+#   env SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm bash scripts/submit_shiftc_atm_from_sfc_missing.pbs
 
 set -u
 umask 022
@@ -77,8 +79,8 @@ if [[ ! -f "${INIT_DATES_FILE}" ]]; then
   exit 2
 fi
 
-if ! command -v sup >/dev/null 2>&1; then
-  echo "ERROR 'sup' command is not available in this environment."
+if ! command -v shiftc >/dev/null 2>&1; then
+  echo "ERROR 'shiftc' command is not available in this environment."
   exit 3
 fi
 
@@ -183,8 +185,8 @@ for init_date in "${init_dates[@]}"; do
         continue
       fi
 
-      echo "QUEUE sup shiftc ${REMOTE_HOST}:${remote_file} ${atm_dir}/"
-      shiftc_output="$(sup shiftc "${REMOTE_HOST}:${remote_file}" "${atm_dir}/" 2>&1)"
+      echo "QUEUE shiftc ${REMOTE_HOST}:${remote_file} ${atm_dir}/"
+      shiftc_output="$(shiftc "${REMOTE_HOST}:${remote_file}" "${atm_dir}/" 2>&1)"
       shiftc_status=$?
       printf "[%s] %s %s:%s -> %s\n%s\n" \
         "$(date '+%F %T')" "${shiftc_status}" "${REMOTE_HOST}" "${remote_file}" "${atm_dir}" "${shiftc_output}" >> "${OUTPUT_LOG}"

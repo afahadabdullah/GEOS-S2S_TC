@@ -5,7 +5,7 @@ Utilities for staging GEOS S2S3 forecast data for tropical cyclone evaluation.
 Current focus:
 - keep SFC and ATM GEOS S2S3 forecast collections in separate local roots
 - untar locally available SFC monthly tar files for all available ensembles
-- queue missing ATM monthly tar transfers with `sup shiftc`
+- queue missing ATM monthly tar transfers with `shiftc` from a NAS PFE shell
 - audit ATM coverage against the local SFC tree before resuming transfers
 
 This repo is being used to support later tropical cyclone diagnostics such as GPI and ACE for GEOS S2Sv2 vs S2Sv3 comparisons.
@@ -120,6 +120,7 @@ The ATM shiftc workflow is also restart-safe:
 - it skips ATM files that are already extracted, already present as tar files, or already submitted to shiftc
 - it writes queue, skip, error, and raw output logs under the ATM root
 - it records `.shiftc_submitted` markers after successful shiftc submissions
+- it should be run directly on PFE/login nodes, not submitted with `qsub`
 
 State files include:
 - `progress.tsv`
@@ -159,10 +160,10 @@ Audit ATM coverage against the local SFC tree:
 bash scripts/audit_atm_vs_sfc_progress.sh
 ```
 
-Resume missing ATM transfers with shiftc:
+Resume missing ATM transfers with shiftc from PFE:
 
 ```bash
-qsub -v SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data,ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_atm_from_sfc_missing.pbs
+env SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt bash scripts/submit_shiftc_atm_from_sfc_missing.pbs
 ```
 
 Legacy `ens1` scp submissions:
