@@ -12,7 +12,7 @@ umask 022
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR%/scripts}"
 
-TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm}"
+TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
 INIT_DATES_FILE="${INIT_DATES_FILE:-${REPO_ROOT}/config/init_dates_late_aug_1991_2024.txt}"
 FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
 FILE_INTERVAL_TAG="${FILE_INTERVAL_TAG:-daily}"

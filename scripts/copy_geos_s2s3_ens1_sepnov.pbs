@@ -42,7 +42,7 @@ RESUBMIT_SCRIPT="${RESUBMIT_SCRIPT:-}"
 
 REMOTE_HOST="${REMOTE_HOST:-lou}"
 REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
-DEST_ROOT="${DEST_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm}"
+DEST_ROOT="${DEST_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
 
 ENS="${ENS:-ens1}"
 COLLECTION="${COLLECTION:-sfc_tavg_3hr_glo_L720x361_sfc}"

@@ -1,15 +1,13 @@
 #!/bin/bash
 
-# Legacy helper for the previous direction of migration.
-#
-# Current workflows now use the project data tree as the unified root. Prefer:
-#   scripts/move_geoss2s3_atm_to_project_data.sh
+# Move GEOS_fcst files from the old ATM staging root into the project data
+# tree, preserving GEOS_fcst/<init>/<ens>/<collection>/ layout.
 
 set -u
 umask 022
 
-SOURCE_ROOT="${SOURCE_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data/GEOS_fcst}"
-TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm/GEOS_fcst}"
+SOURCE_ROOT="${SOURCE_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm/GEOS_fcst}"
+TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data/GEOS_fcst}"
 DRY_RUN="${DRY_RUN:-1}"
 
 if [[ ! -d "${SOURCE_ROOT}" ]]; then
@@ -29,6 +27,7 @@ else
   rsync -avh --ignore-existing --remove-source-files "${SOURCE_ROOT}/" "${TARGET_ROOT}/"
 fi
 
-echo "Move complete: $(date)"
-echo "Empty source directories may remain. Remove them manually after checking:"
+echo "Move step complete: $(date)"
+echo "Files already present in TARGET_ROOT are left in SOURCE_ROOT."
+echo "After checking the result, empty source directories can be removed with:"
 echo "  find ${SOURCE_ROOT} -type d -empty -delete"
