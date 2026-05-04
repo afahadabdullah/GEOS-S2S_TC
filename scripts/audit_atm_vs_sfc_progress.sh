@@ -56,7 +56,10 @@ has_month_nc4() {
   local files=()
 
   shopt -s nullglob
-  files=("${dir}/${init_date}.${collection}.${yyyymm}"*.nc4)
+  files=(
+    "${dir}/${init_date}.${collection}.${FILE_INTERVAL_TAG}.${yyyymm}"*.nc4
+    "${dir}/${init_date}.${collection}.${yyyymm}"*.nc4
+  )
   shopt -u nullglob
 
   [[ "${#files[@]}" -gt 0 ]]
