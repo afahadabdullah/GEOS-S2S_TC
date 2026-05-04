@@ -141,13 +141,13 @@ Move any files that were previously staged under the old ATM root back into
 the project data tree. Start with the dry run:
 
 ```bash
-DRY_RUN=1 bash scripts/move_geoss2s3_atm_to_project_data.sh
+env DRY_RUN=1 bash scripts/move_geoss2s3_atm_to_project_data.sh
 ```
 
 If the dry run looks correct, run the move:
 
 ```bash
-DRY_RUN=0 bash scripts/move_geoss2s3_atm_to_project_data.sh
+env DRY_RUN=0 bash scripts/move_geoss2s3_atm_to_project_data.sh
 ```
 
 Audit ATM coverage against the local SFC tree:
