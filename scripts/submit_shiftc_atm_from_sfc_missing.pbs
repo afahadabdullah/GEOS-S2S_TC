@@ -1,0 +1,203 @@
+#!/bin/bash -l
+
+#######################################################################
+#                     Batch Parameters for Run Job
+#######################################################################
+
+#PBS -l walltime=8:00:00
+#PBS -l select=1:ncpus=1:model=sky_ele
+#PBS -N geos_atm_shiftc
+#PBS -q normal
+#PBS -W group_list=s2406
+#PBS -j oe -k oed
+
+# Queue ATM shiftc transfers using the local SFC tree as the expected
+# init/ensemble/month universe. This avoids remote ensemble discovery and only
+# calls `sup shiftc` for ATM files missing locally.
+#
+# Example:
+#   qsub -v TARGET_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_atm_from_sfc_missing.pbs
+
+set -u
+umask 022
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${SCRIPT_DIR%/scripts}"
+
+TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
+INIT_DATES_FILE="${INIT_DATES_FILE:-${REPO_ROOT}/config/init_dates_late_aug_1991_2024.txt}"
+FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
+FILE_INTERVAL_TAG="${FILE_INTERVAL_TAG:-daily}"
+
+SFC_COLLECTION="${SFC_COLLECTION:-sfc_tavg_3hr_glo_L720x361_sfc}"
+ATM_COLLECTION="${ATM_COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
+REMOTE_HOST="${REMOTE_HOST:-lfe6}"
+REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
+IGNORE_SUBMITTED_MARKERS="${IGNORE_SUBMITTED_MARKERS:-0}"
+
+QUEUE_LOG="${QUEUE_LOG:-${TARGET_ROOT}/shiftc_atm_queue.tsv}"
+SKIP_LOG="${SKIP_LOG:-${TARGET_ROOT}/shiftc_atm_skipped.tsv}"
+ERROR_LOG="${ERROR_LOG:-${TARGET_ROOT}/shiftc_atm_errors.tsv}"
+OUTPUT_LOG="${OUTPUT_LOG:-${TARGET_ROOT}/shiftc_atm_output.log}"
+
+queued_count=0
+skipped_count=0
+missing_sfc_count=0
+error_count=0
+
+echo "Job started: $(date)"
+echo "TARGET_ROOT=${TARGET_ROOT}"
+echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
+echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
+echo "REMOTE_HOST=${REMOTE_HOST}"
+echo "REMOTE_ROOT=${REMOTE_ROOT}"
+echo "IGNORE_SUBMITTED_MARKERS=${IGNORE_SUBMITTED_MARKERS}"
+echo "SUBMIT_DIR=${SUBMIT_DIR}"
+
+mkdir -p "${TARGET_ROOT}/GEOS_fcst"
+
+if [[ -d "${SUBMIT_DIR}" ]]; then
+  cd "${SUBMIT_DIR}"
+fi
+
+if [[ ! -f "${INIT_DATES_FILE}" ]]; then
+  echo "ERROR init-date file not found: ${INIT_DATES_FILE}"
+  exit 2
+fi
+
+if ! command -v sup >/dev/null 2>&1; then
+  echo "ERROR 'sup' command is not available in this environment."
+  exit 3
+fi
+
+mapfile -t init_dates < <(tr -s '[:space:]' '\n' < "${INIT_DATES_FILE}" | grep -E '^[0-9]{8}$')
+read -r -a forecast_month_array <<< "${FORECAST_MONTHS}"
+
+if [[ "${#init_dates[@]}" -eq 0 ]]; then
+  echo "ERROR no valid init dates found in ${INIT_DATES_FILE}"
+  exit 4
+fi
+
+if [[ "${#forecast_month_array[@]}" -eq 0 ]]; then
+  echo "ERROR no forecast months configured"
+  exit 5
+fi
+
+has_month_nc4() {
+  local dir="$1"
+  local init_date="$2"
+  local collection="$3"
+  local yyyymm="$4"
+  local files=()
+
+  shopt -s nullglob
+  files=("${dir}/${init_date}.${collection}.${yyyymm}"*.nc4)
+  shopt -u nullglob
+
+  [[ "${#files[@]}" -gt 0 ]]
+}
+
+month_status() {
+  local dir="$1"
+  local init_date="$2"
+  local collection="$3"
+  local yyyymm="$4"
+  local tar_name="${init_date}.${collection}.${FILE_INTERVAL_TAG}.${yyyymm}.nc4.tar"
+
+  if [[ -f "${dir}/${tar_name}.untar_done" ]]; then
+    echo "extracted_marker"
+  elif has_month_nc4 "${dir}" "${init_date}" "${collection}" "${yyyymm}"; then
+    echo "extracted_nc4"
+  elif [[ -f "${dir}/${tar_name}" ]]; then
+    echo "tar_present"
+  elif [[ "${IGNORE_SUBMITTED_MARKERS}" != "1" && -f "${dir}/${tar_name}.shiftc_submitted" ]]; then
+    echo "shiftc_submitted"
+  else
+    echo "missing"
+  fi
+}
+
+is_done_or_pending() {
+  case "$1" in
+    extracted_marker|extracted_nc4|tar_present|shiftc_submitted) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+printf "time\tinit_date\tens\tforecast_month\tfile_name\tlocal_dir\tshift_id\tremote_file\n" >> "${QUEUE_LOG}"
+printf "time\tstatus\tinit_date\tens\tforecast_month\tfile_name\tlocal_dir\n" >> "${SKIP_LOG}"
+printf "time\tstatus\tinit_date\tens\tforecast_month\tfile_name\tremote_file\toutput\n" >> "${ERROR_LOG}"
+
+for init_date in "${init_dates[@]}"; do
+  init_year="${init_date:0:4}"
+  init_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}"
+
+  if [[ ! -d "${init_dir}" ]]; then
+    continue
+  fi
+
+  mapfile -t ens_dirs < <(find "${init_dir}" -mindepth 1 -maxdepth 1 -type d -name 'ens*' -exec basename {} \; | sort)
+
+  for ens in "${ens_dirs[@]}"; do
+    sfc_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}/${ens}/${SFC_COLLECTION}"
+    atm_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}/${ens}/${ATM_COLLECTION}"
+    mkdir -p "${atm_dir}"
+
+    for fcst_month in "${forecast_month_array[@]}"; do
+      yyyymm="${init_year}${fcst_month}"
+      atm_tar="${init_date}.${ATM_COLLECTION}.${FILE_INTERVAL_TAG}.${yyyymm}.nc4.tar"
+      remote_file="${REMOTE_ROOT}/${init_date}/${ens}/${ATM_COLLECTION}/${atm_tar}"
+      local_tar="${atm_dir}/${atm_tar}"
+      submitted_marker="${local_tar}.shiftc_submitted"
+
+      sfc_status="$(month_status "${sfc_dir}" "${init_date}" "${SFC_COLLECTION}" "${yyyymm}")"
+
+      if ! is_done_or_pending "${sfc_status}"; then
+        missing_sfc_count=$((missing_sfc_count + 1))
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+          "$(date '+%F %T')" "missing_sfc_reference" "${init_date}" "${ens}" "${fcst_month}" "${atm_tar}" "${atm_dir}" >> "${SKIP_LOG}"
+        continue
+      fi
+
+      atm_status="$(month_status "${atm_dir}" "${init_date}" "${ATM_COLLECTION}" "${yyyymm}")"
+
+      if is_done_or_pending "${atm_status}"; then
+        skipped_count=$((skipped_count + 1))
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+          "$(date '+%F %T')" "${atm_status}" "${init_date}" "${ens}" "${fcst_month}" "${atm_tar}" "${atm_dir}" >> "${SKIP_LOG}"
+        continue
+      fi
+
+      echo "QUEUE sup shiftc ${REMOTE_HOST}:${remote_file} ${atm_dir}/"
+      shiftc_output="$(sup shiftc "${REMOTE_HOST}:${remote_file}" "${atm_dir}/" 2>&1)"
+      shiftc_status=$?
+      printf "[%s] %s %s:%s -> %s\n%s\n" \
+        "$(date '+%F %T')" "${shiftc_status}" "${REMOTE_HOST}" "${remote_file}" "${atm_dir}" "${shiftc_output}" >> "${OUTPUT_LOG}"
+
+      if (( shiftc_status == 0 )); then
+        shift_id="$(printf "%s\n" "${shiftc_output}" | sed -nE 's/.*([0-9]{5,}).*/\1/p' | head -1)"
+        touch "${submitted_marker}"
+        queued_count=$((queued_count + 1))
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s:%s\n" \
+          "$(date '+%F %T')" "${init_date}" "${ens}" "${fcst_month}" "${atm_tar}" "${atm_dir}" "${shift_id:-unknown}" "${REMOTE_HOST}" "${remote_file}" >> "${QUEUE_LOG}"
+      else
+        error_count=$((error_count + 1))
+        one_line_output="$(printf "%s" "${shiftc_output}" | tr '\t\r\n' '   ')"
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s:%s\t%s\n" \
+          "$(date '+%F %T')" "shiftc_submit_failed" "${init_date}" "${ens}" "${fcst_month}" "${atm_tar}" "${REMOTE_HOST}" "${remote_file}" "${one_line_output}" >> "${ERROR_LOG}"
+      fi
+    done
+  done
+done
+
+echo "Job finished: $(date)"
+echo "Summary:"
+echo "  queued=${queued_count}"
+echo "  skipped=${skipped_count}"
+echo "  missing_sfc_reference=${missing_sfc_count}"
+echo "  errors=${error_count}"
+echo "  queue_log=${QUEUE_LOG}"
+echo "  skip_log=${SKIP_LOG}"
+echo "  error_log=${ERROR_LOG}"
+echo "  output_log=${OUTPUT_LOG}"
