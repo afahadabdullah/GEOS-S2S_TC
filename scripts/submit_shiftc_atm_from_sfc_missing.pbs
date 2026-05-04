@@ -16,7 +16,7 @@
 # calls `sup shiftc` for ATM files missing locally.
 #
 # Example:
-#   qsub -v TARGET_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_atm_from_sfc_missing.pbs
+#   qsub -v SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data,ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_atm_from_sfc_missing.pbs
 
 set -u
 umask 022
@@ -25,7 +25,17 @@ SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR%/scripts}"
 
-TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
+DEFAULT_SFC_ROOT="/nobackupp27/afahad/project/GEOS-S2S_TC/data"
+DEFAULT_ATM_ROOT="/nobackupp27/afahad/GEOSS2S3_atm"
+
+if [[ -n "${TARGET_ROOT:-}" ]]; then
+  SFC_ROOT="${SFC_ROOT:-${TARGET_ROOT}}"
+  ATM_ROOT="${ATM_ROOT:-${TARGET_ROOT}}"
+else
+  SFC_ROOT="${SFC_ROOT:-${DEFAULT_SFC_ROOT}}"
+  ATM_ROOT="${ATM_ROOT:-${DEFAULT_ATM_ROOT}}"
+fi
+
 INIT_DATES_FILE="${INIT_DATES_FILE:-${REPO_ROOT}/config/init_dates_late_aug_1991_2024.txt}"
 FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
 FILE_INTERVAL_TAG="${FILE_INTERVAL_TAG:-daily}"
@@ -36,10 +46,10 @@ REMOTE_HOST="${REMOTE_HOST:-lfe6}"
 REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
 IGNORE_SUBMITTED_MARKERS="${IGNORE_SUBMITTED_MARKERS:-0}"
 
-QUEUE_LOG="${QUEUE_LOG:-${TARGET_ROOT}/shiftc_atm_queue.tsv}"
-SKIP_LOG="${SKIP_LOG:-${TARGET_ROOT}/shiftc_atm_skipped.tsv}"
-ERROR_LOG="${ERROR_LOG:-${TARGET_ROOT}/shiftc_atm_errors.tsv}"
-OUTPUT_LOG="${OUTPUT_LOG:-${TARGET_ROOT}/shiftc_atm_output.log}"
+QUEUE_LOG="${QUEUE_LOG:-${ATM_ROOT}/shiftc_atm_queue.tsv}"
+SKIP_LOG="${SKIP_LOG:-${ATM_ROOT}/shiftc_atm_skipped.tsv}"
+ERROR_LOG="${ERROR_LOG:-${ATM_ROOT}/shiftc_atm_errors.tsv}"
+OUTPUT_LOG="${OUTPUT_LOG:-${ATM_ROOT}/shiftc_atm_output.log}"
 
 queued_count=0
 skipped_count=0
@@ -47,7 +57,8 @@ missing_sfc_count=0
 error_count=0
 
 echo "Job started: $(date)"
-echo "TARGET_ROOT=${TARGET_ROOT}"
+echo "SFC_ROOT=${SFC_ROOT}"
+echo "ATM_ROOT=${ATM_ROOT}"
 echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
 echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
 echo "REMOTE_HOST=${REMOTE_HOST}"
@@ -55,7 +66,7 @@ echo "REMOTE_ROOT=${REMOTE_ROOT}"
 echo "IGNORE_SUBMITTED_MARKERS=${IGNORE_SUBMITTED_MARKERS}"
 echo "SUBMIT_DIR=${SUBMIT_DIR}"
 
-mkdir -p "${TARGET_ROOT}/GEOS_fcst"
+mkdir -p "${SFC_ROOT}/GEOS_fcst" "${ATM_ROOT}/GEOS_fcst"
 
 if [[ -d "${SUBMIT_DIR}" ]]; then
   cd "${SUBMIT_DIR}"
@@ -134,7 +145,7 @@ printf "time\tstatus\tinit_date\tens\tforecast_month\tfile_name\tremote_file\tou
 
 for init_date in "${init_dates[@]}"; do
   init_year="${init_date:0:4}"
-  init_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}"
+  init_dir="${SFC_ROOT}/GEOS_fcst/${init_date}"
 
   if [[ ! -d "${init_dir}" ]]; then
     continue
@@ -143,8 +154,8 @@ for init_date in "${init_dates[@]}"; do
   mapfile -t ens_dirs < <(find "${init_dir}" -mindepth 1 -maxdepth 1 -type d -name 'ens*' -exec basename {} \; | sort)
 
   for ens in "${ens_dirs[@]}"; do
-    sfc_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}/${ens}/${SFC_COLLECTION}"
-    atm_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}/${ens}/${ATM_COLLECTION}"
+    sfc_dir="${SFC_ROOT}/GEOS_fcst/${init_date}/${ens}/${SFC_COLLECTION}"
+    atm_dir="${ATM_ROOT}/GEOS_fcst/${init_date}/${ens}/${ATM_COLLECTION}"
     mkdir -p "${atm_dir}"
 
     for fcst_month in "${forecast_month_array[@]}"; do

@@ -3,7 +3,7 @@
 Utilities for staging GEOS S2S3 forecast data for tropical cyclone evaluation.
 
 Current focus:
-- preserve GEOS S2S3 forecast files under one local project data tree
+- keep SFC and ATM GEOS S2S3 forecast collections in separate local roots
 - untar locally available SFC monthly tar files for all available ensembles
 - queue missing ATM monthly tar transfers with `sup shiftc`
 - audit ATM coverage against the local SFC tree before resuming transfers
@@ -24,6 +24,7 @@ GEOS-S2S_TC/
 |   |-- submit_shiftc_atm_from_sfc_missing.pbs
 |   |-- submit_shiftc_pull_son_allens.pbs
 |   |-- untar_local_sfc_late_aug_allens.pbs
+|   |-- cleanup_split_sfc_atm_roots.sh
 |   |-- move_geoss2s3_atm_to_project_data.sh
 |   `-- move_project_data_to_geoss2s3_atm.sh
 `-- README.md
@@ -33,25 +34,27 @@ GEOS-S2S_TC/
 
 - Remote host: `lou`
 - Remote root: `/lou/la5/knakada/GEOSS2S3/GEOS_fcst`
-- Local project root: `/nobackupp27/afahad/project/GEOS-S2S_TC/data`
-- Local GEOS tree: `/nobackupp27/afahad/project/GEOS-S2S_TC/data/GEOS_fcst`
+- Local SFC root: `/nobackupp27/afahad/project/GEOS-S2S_TC/data`
+- Local SFC GEOS tree: `/nobackupp27/afahad/project/GEOS-S2S_TC/data/GEOS_fcst`
+- Local ATM root: `/nobackupp27/afahad/GEOSS2S3_atm`
+- Local ATM GEOS tree: `/nobackupp27/afahad/GEOSS2S3_atm/GEOS_fcst`
 - Ensembles: all locally available `ens*` directories for the local SFC and shiftc-resume workflows
 - Forecast months: September, October, and November unless a script explicitly overrides this
 - Init dates: late August (`0824` and `0829`) from the supplied manifest files
 
-Files are stored under:
+SFC files are stored under:
 
 ```text
-/nobackupp27/afahad/project/GEOS-S2S_TC/data/GEOS_fcst/<init_date>/<ens>/<collection>/
+/nobackupp27/afahad/project/GEOS-S2S_TC/data/GEOS_fcst/<init_date>/<ens>/sfc_tavg_3hr_glo_L720x361_sfc/
 ```
 
-The unified processing root is:
+ATM files are stored under:
 
 ```text
-/nobackupp27/afahad/project/GEOS-S2S_TC/data
+/nobackupp27/afahad/GEOSS2S3_atm/GEOS_fcst/<init_date>/<ens>/atm_inst_6hr_glo_L720x361_p49/
 ```
 
-The older ATM staging root was `/nobackupp27/afahad/GEOSS2S3_atm/GEOS_fcst`. Use `scripts/move_geoss2s3_atm_to_project_data.sh` to move any files from that older root back into the project data tree.
+Use `scripts/cleanup_split_sfc_atm_roots.sh` if files were accidentally moved across roots.
 
 ## Main PBS Jobs
 
@@ -74,7 +77,8 @@ Script:
 - [scripts/submit_shiftc_atm_from_sfc_missing.pbs](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/submit_shiftc_atm_from_sfc_missing.pbs)
 
 Defaults:
-- target root: `/nobackupp27/afahad/project/GEOS-S2S_TC/data`
+- SFC root: `/nobackupp27/afahad/project/GEOS-S2S_TC/data`
+- ATM root: `/nobackupp27/afahad/GEOSS2S3_atm`
 - collection: `atm_inst_6hr_glo_L720x361_p49`
 - init dates: `1991-2024`, late August
 - forecast months: `09 10 11`
@@ -114,7 +118,7 @@ The ATM shiftc workflow is also restart-safe:
 
 - it uses the local SFC tree as the expected init/ensemble/month universe
 - it skips ATM files that are already extracted, already present as tar files, or already submitted to shiftc
-- it writes queue, skip, error, and raw output logs under the project data root
+- it writes queue, skip, error, and raw output logs under the ATM root
 - it records `.shiftc_submitted` markers after successful shiftc submissions
 
 State files include:
@@ -137,17 +141,16 @@ Untar locally available SFC files:
 qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,RESUBMIT_SCRIPT=/nobackupp27/afahad/project/GEOS-S2S_TC/scripts/untar_local_sfc_late_aug_allens.pbs /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/untar_local_sfc_late_aug_allens.pbs
 ```
 
-Move any files that were previously staged under the old ATM root back into
-the project data tree. Start with the dry run:
+Clean up crossed SFC/ATM collection files. Start with the dry run:
 
 ```bash
-env DRY_RUN=1 bash scripts/move_geoss2s3_atm_to_project_data.sh
+env DRY_RUN=1 bash scripts/cleanup_split_sfc_atm_roots.sh
 ```
 
 If the dry run looks correct, run the move:
 
 ```bash
-env DRY_RUN=0 bash scripts/move_geoss2s3_atm_to_project_data.sh
+env DRY_RUN=0 bash scripts/cleanup_split_sfc_atm_roots.sh
 ```
 
 Audit ATM coverage against the local SFC tree:
@@ -159,7 +162,7 @@ bash scripts/audit_atm_vs_sfc_progress.sh
 Resume missing ATM transfers with shiftc:
 
 ```bash
-qsub -v TARGET_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_atm_from_sfc_missing.pbs
+qsub -v SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data,ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_atm_from_sfc_missing.pbs
 ```
 
 Legacy `ens1` scp submissions:
@@ -176,5 +179,5 @@ qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_date
 
 - The legacy `scp` scripts still support `ens1` workflows, but current SFC local untar and ATM shiftc-resume workflows use all available local `ens*` directories.
 - The shiftc workflow does not untar ATM tar files; it only queues transfers and records shiftc submission IDs when available.
-- The move script uses `rsync --ignore-existing --remove-source-files`, so files already present in the project data tree are not overwritten.
-- After checking a successful move, empty old staging directories can be removed manually with `find /nobackupp27/afahad/GEOSS2S3_atm/GEOS_fcst -type d -empty -delete`.
+- The cleanup script uses `rsync --ignore-existing --remove-source-files`, so files already present in the correct root are not overwritten.
+- After checking a successful cleanup, empty directories can be removed manually from either GEOS tree with `find <GEOS_fcst_root> -type d -empty -delete`.

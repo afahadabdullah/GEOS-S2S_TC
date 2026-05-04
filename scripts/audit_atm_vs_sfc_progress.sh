@@ -12,7 +12,17 @@ umask 022
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR%/scripts}"
 
-TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
+DEFAULT_SFC_ROOT="/nobackupp27/afahad/project/GEOS-S2S_TC/data"
+DEFAULT_ATM_ROOT="/nobackupp27/afahad/GEOSS2S3_atm"
+
+if [[ -n "${TARGET_ROOT:-}" ]]; then
+  SFC_ROOT="${SFC_ROOT:-${TARGET_ROOT}}"
+  ATM_ROOT="${ATM_ROOT:-${TARGET_ROOT}}"
+else
+  SFC_ROOT="${SFC_ROOT:-${DEFAULT_SFC_ROOT}}"
+  ATM_ROOT="${ATM_ROOT:-${DEFAULT_ATM_ROOT}}"
+fi
+
 INIT_DATES_FILE="${INIT_DATES_FILE:-${REPO_ROOT}/config/init_dates_late_aug_1991_2024.txt}"
 FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
 FILE_INTERVAL_TAG="${FILE_INTERVAL_TAG:-daily}"
@@ -22,7 +32,7 @@ ATM_COLLECTION="${ATM_COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
 REMOTE_HOST="${REMOTE_HOST:-lfe6}"
 REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
 
-REPORT_DIR="${REPORT_DIR:-${TARGET_ROOT}/reports}"
+REPORT_DIR="${REPORT_DIR:-${ATM_ROOT}/reports}"
 REPORT_PREFIX="${REPORT_PREFIX:-atm_vs_sfc}"
 SUMMARY_FILE="${SUMMARY_FILE:-${REPORT_DIR}/${REPORT_PREFIX}_summary.txt}"
 EXPECTED_FILE="${EXPECTED_FILE:-${REPORT_DIR}/${REPORT_PREFIX}_expected.tsv}"
@@ -104,7 +114,7 @@ printf "init_date\tens\tforecast_month\tatm_local_dir\tatm_tar\tremote_file\n" >
 
 for init_date in "${init_dates[@]}"; do
   init_year="${init_date:0:4}"
-  init_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}"
+  init_dir="${SFC_ROOT}/GEOS_fcst/${init_date}"
 
   if [[ ! -d "${init_dir}" ]]; then
     init_missing_count=$((init_missing_count + 1))
@@ -119,8 +129,8 @@ for init_date in "${init_dates[@]}"; do
   fi
 
   for ens in "${ens_dirs[@]}"; do
-    sfc_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}/${ens}/${SFC_COLLECTION}"
-    atm_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}/${ens}/${ATM_COLLECTION}"
+    sfc_dir="${SFC_ROOT}/GEOS_fcst/${init_date}/${ens}/${SFC_COLLECTION}"
+    atm_dir="${ATM_ROOT}/GEOS_fcst/${init_date}/${ens}/${ATM_COLLECTION}"
 
     for fcst_month in "${forecast_month_array[@]}"; do
       yyyymm="${init_year}${fcst_month}"
@@ -155,7 +165,8 @@ done
 
 {
   echo "Generated: $(date)"
-  echo "TARGET_ROOT=${TARGET_ROOT}"
+  echo "SFC_ROOT=${SFC_ROOT}"
+  echo "ATM_ROOT=${ATM_ROOT}"
   echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
   echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
   echo "SFC_COLLECTION=${SFC_COLLECTION}"

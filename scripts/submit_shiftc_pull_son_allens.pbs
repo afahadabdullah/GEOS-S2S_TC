@@ -19,7 +19,7 @@
 #   qsub scripts/submit_shiftc_pull_son_allens.pbs
 #
 # Example explicit submit:
-#   qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,TARGET_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_pull_son_allens.pbs
+#   qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data,ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_pull_son_allens.pbs
 
 set -u
 umask 022
@@ -30,18 +30,27 @@ INIT_DATES_FILE="${INIT_DATES_FILE:-}"
 
 REMOTE_HOST="${REMOTE_HOST:-lfe6}"
 REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
-TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
+DEFAULT_SFC_ROOT="/nobackupp27/afahad/project/GEOS-S2S_TC/data"
+DEFAULT_ATM_ROOT="/nobackupp27/afahad/GEOSS2S3_atm"
+
+if [[ -n "${TARGET_ROOT:-}" ]]; then
+  SFC_ROOT="${SFC_ROOT:-${TARGET_ROOT}}"
+  ATM_ROOT="${ATM_ROOT:-${TARGET_ROOT}}"
+else
+  SFC_ROOT="${SFC_ROOT:-${DEFAULT_SFC_ROOT}}"
+  ATM_ROOT="${ATM_ROOT:-${DEFAULT_ATM_ROOT}}"
+fi
 
 FORECAST_MONTHS="${FORECAST_MONTHS:-09 10 11}"
 FILE_INTERVAL_TAG="${FILE_INTERVAL_TAG:-daily}"
-COLLECTIONS=(
-  "sfc_tavg_3hr_glo_L720x361_sfc"
-  "atm_inst_6hr_glo_L720x361_p49"
-)
+SFC_COLLECTION="${SFC_COLLECTION:-sfc_tavg_3hr_glo_L720x361_sfc}"
+ATM_COLLECTION="${ATM_COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
+COLLECTIONS=("${SFC_COLLECTION}" "${ATM_COLLECTION}")
 
-QUEUE_LOG="${QUEUE_LOG:-${TARGET_ROOT}/shiftc_queue.tsv}"
-MISSING_LOG="${MISSING_LOG:-${TARGET_ROOT}/shiftc_missing.tsv}"
-ERROR_LOG="${ERROR_LOG:-${TARGET_ROOT}/shiftc_errors.tsv}"
+LOG_ROOT="${LOG_ROOT:-${ATM_ROOT}}"
+QUEUE_LOG="${QUEUE_LOG:-${LOG_ROOT}/shiftc_queue.tsv}"
+MISSING_LOG="${MISSING_LOG:-${LOG_ROOT}/shiftc_missing.tsv}"
+ERROR_LOG="${ERROR_LOG:-${LOG_ROOT}/shiftc_errors.tsv}"
 
 queued_count=0
 skipped_count=0
@@ -52,12 +61,14 @@ no_ens_count=0
 echo "Job started: $(date)"
 echo "REMOTE_HOST=${REMOTE_HOST}"
 echo "REMOTE_ROOT=${REMOTE_ROOT}"
-echo "TARGET_ROOT=${TARGET_ROOT}"
+echo "SFC_ROOT=${SFC_ROOT}"
+echo "ATM_ROOT=${ATM_ROOT}"
+echo "LOG_ROOT=${LOG_ROOT}"
 echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
 echo "FILE_INTERVAL_TAG=${FILE_INTERVAL_TAG}"
 echo "SUBMIT_DIR=${SUBMIT_DIR}"
 
-mkdir -p "${TARGET_ROOT}/GEOS_fcst"
+mkdir -p "${SFC_ROOT}/GEOS_fcst" "${ATM_ROOT}/GEOS_fcst" "${LOG_ROOT}"
 
 if [[ -d "${SUBMIT_DIR}" ]]; then
   cd "${SUBMIT_DIR}"
@@ -111,6 +122,18 @@ remote_file_exists() {
   ssh -o BatchMode=yes "${REMOTE_HOST}" "test -f '${remote_file}'"
 }
 
+collection_root() {
+  local collection="$1"
+
+  if [[ "${collection}" == "${SFC_COLLECTION}" ]]; then
+    printf "%s\n" "${SFC_ROOT}"
+  elif [[ "${collection}" == "${ATM_COLLECTION}" ]]; then
+    printf "%s\n" "${ATM_ROOT}"
+  else
+    printf "%s\n" "${SFC_ROOT}"
+  fi
+}
+
 for init_date in "${init_dates[@]}"; do
   init_year="${init_date:0:4}"
   remote_init_dir="${REMOTE_ROOT}/${init_date}"
@@ -134,7 +157,8 @@ for init_date in "${init_dates[@]}"; do
 
   for ens in "${ens_dirs[@]}"; do
     for collection in "${COLLECTIONS[@]}"; do
-      local_dir="${TARGET_ROOT}/GEOS_fcst/${init_date}/${ens}/${collection}"
+      collection_local_root="$(collection_root "${collection}")"
+      local_dir="${collection_local_root}/GEOS_fcst/${init_date}/${ens}/${collection}"
       mkdir -p "${local_dir}"
 
       for fcst_month in "${forecast_month_array[@]}"; do
