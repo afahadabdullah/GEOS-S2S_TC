@@ -100,6 +100,7 @@ Defaults:
 - compression: NetCDF4 zlib compression level `4`
 - conda environment: `earth`
 - queue/walltime: `normal` queue with `8:00:00` walltime
+- PBS resources: `select=1:ncpus=40:mpiprocs=40:model=sky_ele`
 - continuation: stops after `27000` seconds, about 7.5 hours, and resubmits itself if files remain
 - tracking manifest: `/nobackupp27/afahad/GEOSS2S3_atm/job_state/atm_vertical_slim_manifest.tsv`
 
