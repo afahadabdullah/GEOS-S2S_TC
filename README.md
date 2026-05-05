@@ -7,6 +7,7 @@ Current focus:
 - untar locally available SFC monthly tar files for all available ensembles
 - queue missing ATM monthly tar transfers with `shiftc` from a NAS PFE shell
 - slim extracted ATM `.nc4` files to selected pressure levels to save space
+- slim extracted SFC `.nc4` files to TC-relevant variables to save space
 - audit ATM coverage against the local SFC tree before resuming transfers
 
 This repo is being used to support later tropical cyclone diagnostics such as GPI and ACE for GEOS S2Sv2 vs S2Sv3 comparisons.
@@ -26,6 +27,8 @@ GEOS-S2S_TC/
 |   |-- submit_shiftc_pull_son_allens.pbs
 |   |-- slim_atm_vertical_levels.py
 |   |-- submit_slim_atm_vertical_levels.pbs
+|   |-- slim_sfc_variables.py
+|   |-- submit_slim_sfc_variables.pbs
 |   |-- untar_local_sfc_late_aug_allens.pbs
 |   |-- cleanup_split_sfc_atm_roots.sh
 |   |-- move_geoss2s3_atm_to_project_data.sh
@@ -108,6 +111,27 @@ The PBS wrapper activates the `earth` conda environment before running Python. T
 
 ### 4. Legacy SFC scp workflow for ens1
 
+### 4. Slim extracted SFC files to TC variables
+
+Scripts:
+- [scripts/slim_sfc_variables.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/slim_sfc_variables.py)
+- [scripts/submit_slim_sfc_variables.pbs](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/submit_slim_sfc_variables.pbs)
+
+Defaults:
+- SFC root: `/nobackupp27/afahad/project/GEOS-S2S_TC/data`
+- collection: `sfc_tavg_3hr_glo_L720x361_sfc`
+- kept variables and aliases: `U10M,V10M,US,VS,TS,SST,T2M,QV2M,PRECTOT,PRECTOTCORR,PRECCON,PRECLSC,PRECSNO,PRECTOTLAND,LHF,LHFLX,EFLUX`
+- compression: NetCDF4 zlib compression level `4`
+- conda environment: `earth`
+- queue/walltime: `normal` queue with `8:00:00` walltime
+- PBS resources: `select=1:ncpus=40:mpiprocs=40:model=sky_ele`
+- continuation: stops after `27000` seconds, about 7.5 hours, and resubmits itself if files remain
+- tracking manifest: `/nobackupp27/afahad/project/GEOS-S2S_TC/data/job_state/sfc_variable_slim_manifest.tsv`
+
+The SFC slimmer removes every non-coordinate variable outside the keep list. It keeps coordinate/grid variables required by the retained variables, rewrites each `.nc4` in place through a temporary file, and writes `.sfc_var_slim_done` markers so reruns skip files already processed.
+
+### 5. Legacy SFC scp workflow for ens1
+
 Script:
 - [scripts/copy_geos_s2s3_ens1_sepnov.pbs](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/copy_geos_s2s3_ens1_sepnov.pbs)
 
@@ -116,7 +140,7 @@ Defaults:
 - init dates: `1999-2024`, late August
 - forecast months: `09 10 11`
 
-### 5. Legacy ATM scp workflow for ens1
+### 6. Legacy ATM scp workflow for ens1
 
 Script:
 - [scripts/copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs)
@@ -204,6 +228,18 @@ If the compute node cannot auto-detect conda, add `CONDA_BASE=/full/path/to/mini
 
 To change the continuation threshold, add `ELAPSED_LIMIT_SECONDS=<seconds>` to the `qsub -v` list.
 
+Slim already-extracted SFC `.nc4` files on compute nodes:
+
+```bash
+qsub -v SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,FORECAST_MONTHS=09:10,CONDA_ENV=earth /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_slim_sfc_variables.pbs
+```
+
+For a small SFC test first:
+
+```bash
+qsub -v SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,FORECAST_MONTHS=09:10,MAX_FILES=2,CONDA_ENV=earth /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_slim_sfc_variables.pbs
+```
+
 Legacy `ens1` scp submissions:
 
 ```bash
@@ -219,5 +255,6 @@ qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_date
 - The legacy `scp` scripts still support `ens1` workflows, but current SFC local untar and ATM shiftc-resume workflows use all available local `ens*` directories.
 - The shiftc workflow does not untar ATM tar files; it only queues transfers and records shiftc submission IDs when available.
 - The ATM vertical slimming workflow only processes extracted `.nc4` files. Monthly `.tar` files must be extracted before they can be slimmed.
+- The SFC variable slimming workflow only processes extracted `.nc4` files. Monthly `.tar` files must be extracted before they can be slimmed.
 - The cleanup script uses `rsync --ignore-existing --remove-source-files`, so files already present in the correct root are not overwritten.
 - After checking a successful cleanup, empty directories can be removed manually from either GEOS tree with `find <GEOS_fcst_root> -type d -empty -delete`.

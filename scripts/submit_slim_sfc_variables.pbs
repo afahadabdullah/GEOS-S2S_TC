@@ -1,0 +1,253 @@
+#!/bin/bash -l
+
+#######################################################################
+#                     Batch Parameters for Run Job
+#######################################################################
+
+#PBS -l walltime=8:00:00
+#PBS -l select=1:ncpus=40:mpiprocs=40:model=sky_ele
+#PBS -N geos_sfc_slim
+#PBS -q normal
+#PBS -W group_list=s2406
+#PBS -j oe -k oed
+
+# Slim extracted SFC .nc4 files by keeping only selected TC-relevant
+# variables. Sidecar .sfc_var_slim_done markers make reruns resumable.
+
+set -u
+umask 022
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+SCRIPT_NAME="submit_slim_sfc_variables.pbs"
+RESUBMIT_SCRIPT="${RESUBMIT_SCRIPT:-}"
+JOB_START_EPOCH="$(date +%s)"
+
+if [[ -d "${SUBMIT_DIR}/scripts" ]]; then
+  REPO_ROOT="${SUBMIT_DIR}"
+elif [[ "$(basename "${SUBMIT_DIR}")" == "scripts" ]]; then
+  REPO_ROOT="${SUBMIT_DIR%/scripts}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  REPO_ROOT="${SCRIPT_DIR%/scripts}"
+fi
+
+SFC_ROOT="${SFC_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
+SFC_COLLECTION="${SFC_COLLECTION:-sfc_tavg_3hr_glo_L720x361_sfc}"
+INIT_DATES_FILE="${INIT_DATES_FILE:-${REPO_ROOT}/config/init_dates_late_aug_1991_2024.txt}"
+FORECAST_MONTHS="${FORECAST_MONTHS:-}"
+KEEP_VARIABLES="${KEEP_VARIABLES:-U10M,V10M,US,VS,TS,SST,T2M,QV2M,PRECTOT,PRECTOTCORR,PRECCON,PRECLSC,PRECSNO,PRECTOTLAND,LHF,LHFLX,EFLUX}"
+COMPLEVEL="${COMPLEVEL:-4}"
+WORKERS="${WORKERS:-1}"
+MAX_FILES="${MAX_FILES:-0}"
+FORCE="${FORCE:-0}"
+DRY_RUN="${DRY_RUN:-0}"
+ELAPSED_LIMIT_SECONDS="${ELAPSED_LIMIT_SECONDS:-27000}"
+STOP_AFTER_SECONDS="${STOP_AFTER_SECONDS:-${ELAPSED_LIMIT_SECONDS}}"
+CONDA_ENV="${CONDA_ENV:-earth}"
+CONDA_BASE="${CONDA_BASE:-}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+MANIFEST_FILE="${MANIFEST_FILE:-${SFC_ROOT}/job_state/sfc_variable_slim_manifest.tsv}"
+
+resolve_conda_base() {
+  local candidate
+  local candidates=()
+
+  if [[ -n "${CONDA_BASE}" && -d "${CONDA_BASE}" ]]; then
+    return 0
+  fi
+
+  if command -v conda >/dev/null 2>&1; then
+    CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+    if [[ -n "${CONDA_BASE}" && -d "${CONDA_BASE}" ]]; then
+      return 0
+    fi
+  fi
+
+  candidates=(
+    "${HOME:-}/miniconda3"
+    "${HOME:-}/miniforge3"
+    "${HOME:-}/anaconda3"
+    "/nobackupnfs1/afahad/miniconda3"
+    "/nobackupnfs1/afahad/miniforge3"
+    "/nobackupp27/afahad/miniconda3"
+    "/nobackupp27/afahad/miniforge3"
+    "/nobackupp27/afahad/anaconda3"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "${candidate}" && -d "${candidate}" ]]; then
+      CONDA_BASE="${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+activate_conda_env() {
+  local activate_status
+
+  if [[ -z "${CONDA_ENV}" || "${CONDA_ENV}" == "none" ]]; then
+    echo "Skipping conda activation because CONDA_ENV=${CONDA_ENV}"
+    return 0
+  fi
+
+  if ! resolve_conda_base; then
+    echo "ERROR could not find conda base."
+    echo "Pass it explicitly, for example:"
+    echo "  qsub -v CONDA_BASE=/path/to/miniconda3,CONDA_ENV=${CONDA_ENV} ..."
+    return 1
+  fi
+
+  if [[ -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
+    set +u
+    # shellcheck disable=SC1091
+    source "${CONDA_BASE}/etc/profile.d/conda.sh"
+    conda activate "${CONDA_ENV}"
+    activate_status=$?
+    set -u
+    return "${activate_status}"
+  elif [[ -f "${CONDA_BASE}/bin/activate" ]]; then
+    set +u
+    # shellcheck disable=SC1091
+    source "${CONDA_BASE}/bin/activate" "${CONDA_ENV}"
+    activate_status=$?
+    set -u
+    return "${activate_status}"
+  else
+    echo "ERROR conda activation scripts not found under CONDA_BASE=${CONDA_BASE}"
+    return 1
+  fi
+}
+
+resolve_resubmit_script() {
+  local candidate
+  local candidates=()
+
+  if [[ "${RESUBMIT_SCRIPT}" == /var/spool/pbs/* ]]; then
+    echo "Ignoring spool-based RESUBMIT_SCRIPT=${RESUBMIT_SCRIPT}"
+    RESUBMIT_SCRIPT=""
+  fi
+
+  if [[ -n "${RESUBMIT_SCRIPT}" && -f "${RESUBMIT_SCRIPT}" ]]; then
+    return 0
+  fi
+
+  candidates=(
+    "${REPO_ROOT}/scripts/${SCRIPT_NAME}"
+    "${SUBMIT_DIR}/${SCRIPT_NAME}"
+    "${SUBMIT_DIR}/scripts/${SCRIPT_NAME}"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      RESUBMIT_SCRIPT="${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+resubmit_job() {
+  local new_job_id
+
+  if ! resolve_resubmit_script; then
+    echo "ERROR could not resolve RESUBMIT_SCRIPT for continuation."
+    echo "Pass it explicitly with:"
+    echo "  qsub -v RESUBMIT_SCRIPT=/full/path/to/${SCRIPT_NAME} ${SCRIPT_NAME}"
+    return 1
+  fi
+
+  export SFC_ROOT SFC_COLLECTION INIT_DATES_FILE FORECAST_MONTHS
+  export KEEP_VARIABLES COMPLEVEL WORKERS MAX_FILES
+  export FORCE DRY_RUN MANIFEST_FILE
+  export ELAPSED_LIMIT_SECONDS STOP_AFTER_SECONDS
+  export CONDA_ENV CONDA_BASE PYTHON_BIN RESUBMIT_SCRIPT
+
+  if new_job_id=$(qsub -V "${RESUBMIT_SCRIPT}"); then
+    echo "Submitted continuation job: ${new_job_id}"
+    return 0
+  fi
+
+  echo "ERROR qsub resubmission failed for ${RESUBMIT_SCRIPT}"
+  return 1
+}
+
+echo "Job started: $(date)"
+echo "REPO_ROOT=${REPO_ROOT}"
+echo "SFC_ROOT=${SFC_ROOT}"
+echo "SFC_COLLECTION=${SFC_COLLECTION}"
+echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
+echo "FORECAST_MONTHS=${FORECAST_MONTHS:-all}"
+echo "KEEP_VARIABLES=${KEEP_VARIABLES}"
+echo "COMPLEVEL=${COMPLEVEL}"
+echo "WORKERS=${WORKERS}"
+echo "MAX_FILES=${MAX_FILES}"
+echo "FORCE=${FORCE}"
+echo "DRY_RUN=${DRY_RUN}"
+echo "ELAPSED_LIMIT_SECONDS=${ELAPSED_LIMIT_SECONDS}"
+echo "STOP_AFTER_SECONDS=${STOP_AFTER_SECONDS}"
+echo "CONDA_ENV=${CONDA_ENV}"
+echo "CONDA_BASE=${CONDA_BASE:-auto}"
+echo "MANIFEST_FILE=${MANIFEST_FILE}"
+
+cd "${REPO_ROOT}"
+mkdir -p "${SFC_ROOT}/job_state"
+
+if ! activate_conda_env; then
+  exit 6
+fi
+
+if [[ -z "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)"
+fi
+
+if [[ -z "${PYTHON_BIN}" ]]; then
+  echo "ERROR python was not found after conda activation."
+  exit 7
+fi
+
+echo "ACTIVE_CONDA_PREFIX=${CONDA_PREFIX:-}"
+echo "PYTHON_BIN=${PYTHON_BIN}"
+"${PYTHON_BIN}" - <<'PY'
+import netCDF4
+import numpy
+print("Python dependency check passed: netCDF4 and numpy are available")
+PY
+dep_status=$?
+if (( dep_status != 0 )); then
+  echo "ERROR Python dependency check failed in CONDA_ENV=${CONDA_ENV}"
+  exit 8
+fi
+
+export SFC_ROOT SFC_COLLECTION INIT_DATES_FILE FORECAST_MONTHS
+export KEEP_VARIABLES COMPLEVEL WORKERS MAX_FILES
+export FORCE DRY_RUN MANIFEST_FILE STOP_AFTER_SECONDS ELAPSED_LIMIT_SECONDS JOB_START_EPOCH
+
+"${PYTHON_BIN}" scripts/slim_sfc_variables.py \
+  --sfc-root "${SFC_ROOT}" \
+  --collection "${SFC_COLLECTION}" \
+  --init-dates-file "${INIT_DATES_FILE}" \
+  --forecast-months "${FORECAST_MONTHS}" \
+  --keep-variables "${KEEP_VARIABLES}" \
+  --complevel "${COMPLEVEL}" \
+  --workers "${WORKERS}" \
+  --manifest "${MANIFEST_FILE}" \
+  --max-files "${MAX_FILES}" \
+  --stop-after-seconds "${STOP_AFTER_SECONDS}" \
+  --job-start-epoch "${JOB_START_EPOCH}"
+
+status=$?
+echo "Job finished: $(date)"
+echo "Exit status: ${status}"
+
+if (( status == 75 )); then
+  echo "Python stopped before walltime limit with files remaining; resubmitting continuation."
+  if resubmit_job; then
+    exit 0
+  fi
+  exit 9
+fi
+
+exit "${status}"
