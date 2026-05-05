@@ -6,6 +6,7 @@ Current focus:
 - keep SFC and ATM GEOS S2S3 forecast collections in separate local roots
 - untar locally available SFC monthly tar files for all available ensembles
 - queue missing ATM monthly tar transfers with `shiftc` from a NAS PFE shell
+- slim extracted ATM `.nc4` files to selected pressure levels to save space
 - audit ATM coverage against the local SFC tree before resuming transfers
 
 This repo is being used to support later tropical cyclone diagnostics such as GPI and ACE for GEOS S2Sv2 vs S2Sv3 comparisons.
@@ -23,6 +24,8 @@ GEOS-S2S_TC/
 |   |-- audit_atm_vs_sfc_progress.sh
 |   |-- submit_shiftc_atm_from_sfc_missing.pbs
 |   |-- submit_shiftc_pull_son_allens.pbs
+|   |-- slim_atm_vertical_levels.py
+|   |-- submit_slim_atm_vertical_levels.pbs
 |   |-- untar_local_sfc_late_aug_allens.pbs
 |   |-- cleanup_split_sfc_atm_roots.sh
 |   |-- move_geoss2s3_atm_to_project_data.sh
@@ -84,7 +87,22 @@ Defaults:
 - forecast months: `09 10 11`
 - ensembles: all `ens*` directories already represented in the local SFC tree
 
-### 3. Legacy SFC scp workflow for ens1
+### 3. Slim extracted ATM files to selected pressure levels
+
+Scripts:
+- [scripts/slim_atm_vertical_levels.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/slim_atm_vertical_levels.py)
+- [scripts/submit_slim_atm_vertical_levels.pbs](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/submit_slim_atm_vertical_levels.pbs)
+
+Defaults:
+- ATM root: `/nobackupp27/afahad/GEOSS2S3_atm`
+- collection: `atm_inst_6hr_glo_L720x361_p49`
+- kept pressure levels: `1000,950,850,500,200` hPa
+- compression: NetCDF4 zlib compression level `4`
+- tracking manifest: `/nobackupp27/afahad/GEOSS2S3_atm/job_state/atm_vertical_slim_manifest.tsv`
+
+The script rewrites each extracted `.nc4` file in place through a temporary file in the same directory. Variables with the pressure-level dimension are reduced to the selected levels; variables without that dimension are copied unchanged. Completed files get a `.vertical_slim_done` marker, so new runs skip files that were already processed.
+
+### 4. Legacy SFC scp workflow for ens1
 
 Script:
 - [scripts/copy_geos_s2s3_ens1_sepnov.pbs](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/copy_geos_s2s3_ens1_sepnov.pbs)
@@ -94,7 +112,7 @@ Defaults:
 - init dates: `1999-2024`, late August
 - forecast months: `09 10 11`
 
-### 4. Legacy ATM scp workflow for ens1
+### 5. Legacy ATM scp workflow for ens1
 
 Script:
 - [scripts/copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs)
@@ -166,6 +184,18 @@ Resume missing ATM transfers with shiftc from PFE:
 env SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt bash scripts/submit_shiftc_atm_from_sfc_missing.pbs
 ```
 
+Slim already-extracted ATM `.nc4` files on compute nodes:
+
+```bash
+qsub -v ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,FORECAST_MONTHS=09:10 /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_slim_atm_vertical_levels.pbs
+```
+
+For a small test first:
+
+```bash
+qsub -v ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,FORECAST_MONTHS=09:10,MAX_FILES=2 /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_slim_atm_vertical_levels.pbs
+```
+
 Legacy `ens1` scp submissions:
 
 ```bash
@@ -180,5 +210,6 @@ qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_date
 
 - The legacy `scp` scripts still support `ens1` workflows, but current SFC local untar and ATM shiftc-resume workflows use all available local `ens*` directories.
 - The shiftc workflow does not untar ATM tar files; it only queues transfers and records shiftc submission IDs when available.
+- The ATM vertical slimming workflow only processes extracted `.nc4` files. Monthly `.tar` files must be extracted before they can be slimmed.
 - The cleanup script uses `rsync --ignore-existing --remove-source-files`, so files already present in the correct root are not overwritten.
 - After checking a successful cleanup, empty directories can be removed manually from either GEOS tree with `find <GEOS_fcst_root> -type d -empty -delete`.

@@ -1,0 +1,84 @@
+#!/bin/bash -l
+
+#######################################################################
+#                     Batch Parameters for Run Job
+#######################################################################
+
+#PBS -l walltime=120:00:00
+#PBS -l select=1:ncpus=1:model=sky_ele
+#PBS -N geos_atm_slim
+#PBS -q long
+#PBS -W group_list=s2406
+#PBS -j oe -k oed
+
+# Slim already-extracted ATM .nc4 files by keeping selected pressure levels.
+# This runs on compute nodes and rewrites files in place through same-directory
+# temporary files. Sidecar .vertical_slim_done markers make reruns resumable.
+
+set -u
+umask 022
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+
+if [[ -d "${SUBMIT_DIR}/scripts" ]]; then
+  REPO_ROOT="${SUBMIT_DIR}"
+elif [[ "$(basename "${SUBMIT_DIR}")" == "scripts" ]]; then
+  REPO_ROOT="${SUBMIT_DIR%/scripts}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  REPO_ROOT="${SCRIPT_DIR%/scripts}"
+fi
+
+ATM_ROOT="${ATM_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm}"
+ATM_COLLECTION="${ATM_COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
+INIT_DATES_FILE="${INIT_DATES_FILE:-${REPO_ROOT}/config/init_dates_late_aug_1991_2024.txt}"
+FORECAST_MONTHS="${FORECAST_MONTHS:-}"
+LEVELS_HPA="${LEVELS_HPA:-1000,950,850,500,200}"
+LEVEL_TOLERANCE_HPA="${LEVEL_TOLERANCE_HPA:-0.5}"
+COMPLEVEL="${COMPLEVEL:-4}"
+WORKERS="${WORKERS:-1}"
+MAX_FILES="${MAX_FILES:-0}"
+FORCE="${FORCE:-0}"
+DRY_RUN="${DRY_RUN:-0}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+MANIFEST_FILE="${MANIFEST_FILE:-${ATM_ROOT}/job_state/atm_vertical_slim_manifest.tsv}"
+
+echo "Job started: $(date)"
+echo "REPO_ROOT=${REPO_ROOT}"
+echo "ATM_ROOT=${ATM_ROOT}"
+echo "ATM_COLLECTION=${ATM_COLLECTION}"
+echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
+echo "FORECAST_MONTHS=${FORECAST_MONTHS:-all}"
+echo "LEVELS_HPA=${LEVELS_HPA}"
+echo "LEVEL_TOLERANCE_HPA=${LEVEL_TOLERANCE_HPA}"
+echo "COMPLEVEL=${COMPLEVEL}"
+echo "WORKERS=${WORKERS}"
+echo "MAX_FILES=${MAX_FILES}"
+echo "FORCE=${FORCE}"
+echo "DRY_RUN=${DRY_RUN}"
+echo "PYTHON_BIN=${PYTHON_BIN}"
+echo "MANIFEST_FILE=${MANIFEST_FILE}"
+
+cd "${REPO_ROOT}"
+mkdir -p "${ATM_ROOT}/job_state"
+
+export ATM_ROOT ATM_COLLECTION INIT_DATES_FILE FORECAST_MONTHS
+export LEVELS_HPA LEVEL_TOLERANCE_HPA COMPLEVEL WORKERS MAX_FILES
+export FORCE DRY_RUN MANIFEST_FILE
+
+"${PYTHON_BIN}" scripts/slim_atm_vertical_levels.py \
+  --atm-root "${ATM_ROOT}" \
+  --collection "${ATM_COLLECTION}" \
+  --init-dates-file "${INIT_DATES_FILE}" \
+  --forecast-months "${FORECAST_MONTHS}" \
+  --levels-hpa "${LEVELS_HPA}" \
+  --tolerance-hpa "${LEVEL_TOLERANCE_HPA}" \
+  --complevel "${COMPLEVEL}" \
+  --workers "${WORKERS}" \
+  --manifest "${MANIFEST_FILE}" \
+  --max-files "${MAX_FILES}"
+
+status=$?
+echo "Job finished: $(date)"
+echo "Exit status: ${status}"
+exit "${status}"
