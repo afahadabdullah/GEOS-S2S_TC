@@ -98,9 +98,10 @@ Defaults:
 - collection: `atm_inst_6hr_glo_L720x361_p49`
 - kept pressure levels: `1000,950,850,500,200` hPa
 - compression: NetCDF4 zlib compression level `4`
+- conda environment: `earth`
 - tracking manifest: `/nobackupp27/afahad/GEOSS2S3_atm/job_state/atm_vertical_slim_manifest.tsv`
 
-The script rewrites each extracted `.nc4` file in place through a temporary file in the same directory. Variables with the pressure-level dimension are reduced to the selected levels; variables without that dimension are copied unchanged. Completed files get a `.vertical_slim_done` marker, so new runs skip files that were already processed.
+The PBS wrapper activates the `earth` conda environment before running Python. The script rewrites each extracted `.nc4` file in place through a temporary file in the same directory. Variables with the pressure-level dimension are reduced to the selected levels; variables without that dimension are copied unchanged. Completed files get a `.vertical_slim_done` marker, so new runs skip files that were already processed.
 
 ### 4. Legacy SFC scp workflow for ens1
 
@@ -187,14 +188,16 @@ env SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data ATM_ROOT=/nobackupp27/
 Slim already-extracted ATM `.nc4` files on compute nodes:
 
 ```bash
-qsub -v ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,FORECAST_MONTHS=09:10 /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_slim_atm_vertical_levels.pbs
+qsub -v ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,FORECAST_MONTHS=09:10,CONDA_ENV=earth /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_slim_atm_vertical_levels.pbs
 ```
 
 For a small test first:
 
 ```bash
-qsub -v ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,FORECAST_MONTHS=09:10,MAX_FILES=2 /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_slim_atm_vertical_levels.pbs
+qsub -v ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,FORECAST_MONTHS=09:10,MAX_FILES=2,CONDA_ENV=earth /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_slim_atm_vertical_levels.pbs
 ```
+
+If the compute node cannot auto-detect conda, add `CONDA_BASE=/full/path/to/miniconda3` to the `qsub -v` list.
 
 Legacy `ens1` scp submissions:
 
