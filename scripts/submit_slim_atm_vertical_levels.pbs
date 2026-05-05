@@ -4,10 +4,10 @@
 #                     Batch Parameters for Run Job
 #######################################################################
 
-#PBS -l walltime=120:00:00
+#PBS -l walltime=8:00:00
 #PBS -l select=1:ncpus=1:model=sky_ele
 #PBS -N geos_atm_slim
-#PBS -q long
+#PBS -q normal
 #PBS -W group_list=s2406
 #PBS -j oe -k oed
 
@@ -19,6 +19,9 @@ set -u
 umask 022
 
 SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+SCRIPT_NAME="submit_slim_atm_vertical_levels.pbs"
+RESUBMIT_SCRIPT="${RESUBMIT_SCRIPT:-}"
+JOB_START_EPOCH="$(date +%s)"
 
 if [[ -d "${SUBMIT_DIR}/scripts" ]]; then
   REPO_ROOT="${SUBMIT_DIR}"
@@ -40,6 +43,8 @@ WORKERS="${WORKERS:-1}"
 MAX_FILES="${MAX_FILES:-0}"
 FORCE="${FORCE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+ELAPSED_LIMIT_SECONDS="${ELAPSED_LIMIT_SECONDS:-27000}"
+STOP_AFTER_SECONDS="${STOP_AFTER_SECONDS:-${ELAPSED_LIMIT_SECONDS}}"
 CONDA_ENV="${CONDA_ENV:-earth}"
 CONDA_BASE="${CONDA_BASE:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
@@ -117,6 +122,60 @@ activate_conda_env() {
   fi
 }
 
+resolve_resubmit_script() {
+  local candidate
+  local candidates=()
+
+  if [[ "${RESUBMIT_SCRIPT}" == /var/spool/pbs/* ]]; then
+    echo "Ignoring spool-based RESUBMIT_SCRIPT=${RESUBMIT_SCRIPT}"
+    RESUBMIT_SCRIPT=""
+  fi
+
+  if [[ -n "${RESUBMIT_SCRIPT}" && -f "${RESUBMIT_SCRIPT}" ]]; then
+    return 0
+  fi
+
+  candidates=(
+    "${REPO_ROOT}/scripts/${SCRIPT_NAME}"
+    "${SUBMIT_DIR}/${SCRIPT_NAME}"
+    "${SUBMIT_DIR}/scripts/${SCRIPT_NAME}"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      RESUBMIT_SCRIPT="${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+resubmit_job() {
+  local new_job_id
+
+  if ! resolve_resubmit_script; then
+    echo "ERROR could not resolve RESUBMIT_SCRIPT for continuation."
+    echo "Pass it explicitly with:"
+    echo "  qsub -v RESUBMIT_SCRIPT=/full/path/to/${SCRIPT_NAME} ${SCRIPT_NAME}"
+    return 1
+  fi
+
+  export ATM_ROOT ATM_COLLECTION INIT_DATES_FILE FORECAST_MONTHS
+  export LEVELS_HPA LEVEL_TOLERANCE_HPA COMPLEVEL WORKERS MAX_FILES
+  export FORCE DRY_RUN MANIFEST_FILE
+  export ELAPSED_LIMIT_SECONDS STOP_AFTER_SECONDS
+  export CONDA_ENV CONDA_BASE PYTHON_BIN RESUBMIT_SCRIPT
+
+  if new_job_id=$(qsub -V "${RESUBMIT_SCRIPT}"); then
+    echo "Submitted continuation job: ${new_job_id}"
+    return 0
+  fi
+
+  echo "ERROR qsub resubmission failed for ${RESUBMIT_SCRIPT}"
+  return 1
+}
+
 echo "Job started: $(date)"
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "ATM_ROOT=${ATM_ROOT}"
@@ -130,6 +189,8 @@ echo "WORKERS=${WORKERS}"
 echo "MAX_FILES=${MAX_FILES}"
 echo "FORCE=${FORCE}"
 echo "DRY_RUN=${DRY_RUN}"
+echo "ELAPSED_LIMIT_SECONDS=${ELAPSED_LIMIT_SECONDS}"
+echo "STOP_AFTER_SECONDS=${STOP_AFTER_SECONDS}"
 echo "CONDA_ENV=${CONDA_ENV}"
 echo "CONDA_BASE=${CONDA_BASE:-auto}"
 echo "MANIFEST_FILE=${MANIFEST_FILE}"
@@ -165,7 +226,7 @@ fi
 
 export ATM_ROOT ATM_COLLECTION INIT_DATES_FILE FORECAST_MONTHS
 export LEVELS_HPA LEVEL_TOLERANCE_HPA COMPLEVEL WORKERS MAX_FILES
-export FORCE DRY_RUN MANIFEST_FILE
+export FORCE DRY_RUN MANIFEST_FILE STOP_AFTER_SECONDS ELAPSED_LIMIT_SECONDS JOB_START_EPOCH
 
 "${PYTHON_BIN}" scripts/slim_atm_vertical_levels.py \
   --atm-root "${ATM_ROOT}" \
@@ -177,9 +238,20 @@ export FORCE DRY_RUN MANIFEST_FILE
   --complevel "${COMPLEVEL}" \
   --workers "${WORKERS}" \
   --manifest "${MANIFEST_FILE}" \
-  --max-files "${MAX_FILES}"
+  --max-files "${MAX_FILES}" \
+  --stop-after-seconds "${STOP_AFTER_SECONDS}" \
+  --job-start-epoch "${JOB_START_EPOCH}"
 
 status=$?
 echo "Job finished: $(date)"
 echo "Exit status: ${status}"
+
+if (( status == 75 )); then
+  echo "Python stopped before walltime limit with files remaining; resubmitting continuation."
+  if resubmit_job; then
+    exit 0
+  fi
+  exit 9
+fi
+
 exit "${status}"

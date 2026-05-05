@@ -16,6 +16,7 @@ import re
 import stat
 import sys
 import tempfile
+import time
 import traceback
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +30,7 @@ DEFAULT_LEVELS_HPA = "1000,950,850,500,200"
 DONE_SUFFIX = ".vertical_slim_done"
 DONE_ATTR = "geos_s2s_tc_vertical_slim_done"
 LEVELS_ATTR = "geos_s2s_tc_vertical_slim_levels_hpa"
+TIME_LIMIT_EXIT = 75
 
 
 @dataclass
@@ -424,6 +426,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=int(os.environ.get("WORKERS", "1")))
     parser.add_argument("--manifest", default=os.environ.get("MANIFEST_FILE"))
     parser.add_argument("--max-files", type=int, default=int(os.environ.get("MAX_FILES", "0")))
+    parser.add_argument(
+        "--stop-after-seconds",
+        type=int,
+        default=int(os.environ.get("STOP_AFTER_SECONDS", os.environ.get("ELAPSED_LIMIT_SECONDS", "0"))),
+        help="Stop before starting a new file after this many elapsed seconds; exits 75 when work remains.",
+    )
+    parser.add_argument(
+        "--job-start-epoch",
+        type=int,
+        default=int(os.environ.get("JOB_START_EPOCH", "0")),
+        help="Unix epoch seconds for PBS job start; used with --stop-after-seconds.",
+    )
     parser.add_argument("--force", action="store_true", default=os.environ.get("FORCE", "0") == "1")
     parser.add_argument("--dry-run", action="store_true", default=os.environ.get("DRY_RUN", "0") == "1")
 
@@ -463,6 +477,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"INIT_DATES_FILE={args.init_dates_file or 'all'}")
     print(f"COMPLEVEL={args.complevel}")
     print(f"WORKERS={args.workers}")
+    print(f"STOP_AFTER_SECONDS={args.stop_after_seconds}")
+    print(f"JOB_START_EPOCH={args.job_start_epoch}")
     print(f"DRY_RUN={int(args.dry_run)}")
     print(f"MANIFEST={manifest}")
     print(f"FILES_FOUND={len(files)}")
@@ -470,9 +486,30 @@ def main(argv: list[str] | None = None) -> int:
     if not files:
         return 0
 
+    if args.stop_after_seconds > 0 and args.workers > 1:
+        print("WARN stop-after-seconds is enabled; forcing WORKERS=1 so the job can stop cleanly between files.")
+        args.workers = 1
+
+    run_start_monotonic = time.monotonic()
+    stopped_for_time = False
+    remaining_files = 0
     counts: dict[str, int] = {}
     if args.workers <= 1:
-        for path in files:
+        for index, path in enumerate(files):
+            if args.job_start_epoch > 0:
+                elapsed_seconds = int(time.time() - args.job_start_epoch)
+            else:
+                elapsed_seconds = int(time.monotonic() - run_start_monotonic)
+
+            if args.stop_after_seconds > 0 and elapsed_seconds >= args.stop_after_seconds:
+                stopped_for_time = True
+                remaining_files = len(files) - index
+                print(
+                    f"TIME_LIMIT_REACHED elapsed_seconds={elapsed_seconds} "
+                    f"limit_seconds={args.stop_after_seconds} remaining_files={remaining_files}"
+                )
+                break
+
             result = slim_file(path, args)
             append_manifest(manifest, result)
             counts[result.status] = counts.get(result.status, 0) + 1
@@ -499,8 +536,15 @@ def main(argv: list[str] | None = None) -> int:
     print("Summary:")
     for status, count in sorted(counts.items()):
         print(f"  {status}={count}")
+    if stopped_for_time:
+        print(f"  stopped_for_time=1")
+        print(f"  remaining_files={remaining_files}")
 
-    return 1 if counts.get("error", 0) else 0
+    if counts.get("error", 0):
+        return 1
+    if stopped_for_time:
+        return TIME_LIMIT_EXIT
+    return 0
 
 
 if __name__ == "__main__":

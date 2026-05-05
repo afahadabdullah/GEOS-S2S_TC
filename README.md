@@ -99,9 +99,11 @@ Defaults:
 - kept pressure levels: `1000,950,850,500,200` hPa
 - compression: NetCDF4 zlib compression level `4`
 - conda environment: `earth`
+- queue/walltime: `normal` queue with `8:00:00` walltime
+- continuation: stops after `27000` seconds, about 7.5 hours, and resubmits itself if files remain
 - tracking manifest: `/nobackupp27/afahad/GEOSS2S3_atm/job_state/atm_vertical_slim_manifest.tsv`
 
-The PBS wrapper activates the `earth` conda environment before running Python. The script rewrites each extracted `.nc4` file in place through a temporary file in the same directory. Variables with the pressure-level dimension are reduced to the selected levels; variables without that dimension are copied unchanged. Completed files get a `.vertical_slim_done` marker, so new runs skip files that were already processed.
+The PBS wrapper activates the `earth` conda environment before running Python. The script rewrites each extracted `.nc4` file in place through a temporary file in the same directory. Variables with the pressure-level dimension are reduced to the selected levels; variables without that dimension are copied unchanged. Completed files get a `.vertical_slim_done` marker, so new runs skip files that were already processed. Near the 7.5-hour mark, the processor stops before starting another file and the PBS wrapper submits a continuation job.
 
 ### 4. Legacy SFC scp workflow for ens1
 
@@ -198,6 +200,8 @@ qsub -v ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/a
 ```
 
 If the compute node cannot auto-detect conda, add `CONDA_BASE=/full/path/to/miniconda3` to the `qsub -v` list.
+
+To change the continuation threshold, add `ELAPSED_LIMIT_SECONDS=<seconds>` to the `qsub -v` list.
 
 Legacy `ens1` scp submissions:
 
