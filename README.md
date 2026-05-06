@@ -120,7 +120,7 @@ Scripts:
 Defaults:
 - SFC root: `/nobackupp27/afahad/project/GEOS-S2S_TC/data`
 - collection: `sfc_tavg_3hr_glo_L720x361_sfc`
-- kept variables and aliases: `U10M,V10M,US,VS,TS,SST,T2M,QV2M,QS,QVS,PRECTOT,PRECTOTCORR,PRECCON,PRECLSC,PRECSNO,PRECTOTLAND,LHF,LHFLX,EFLUX`
+- kept variables and aliases: `U10M,V10M,US,VS,TS,SST,T2M,QV2M,QS,QVS,PRECTOT,LHF,LHFLX,EFLUX`
 - compression: NetCDF4 zlib compression level `4`
 - conda environment: `earth`
 - queue/walltime: `normal` queue with `8:00:00` walltime
