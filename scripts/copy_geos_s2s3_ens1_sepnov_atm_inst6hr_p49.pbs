@@ -92,7 +92,7 @@ fi
 
 export REMOTE_HOST="${REMOTE_HOST:-lou}"
 export REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
-export DEST_ROOT="${DEST_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm}"
+export DEST_ROOT="${DEST_ROOT:-/nobackupp17/afahad/GEOSS2S3_atm}"
 
 export ENS="${ENS:-ens1}"
 export COLLECTION="${COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"

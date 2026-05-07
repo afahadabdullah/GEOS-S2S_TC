@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR%/scripts}"
 
 DEFAULT_SFC_ROOT="/nobackupp27/afahad/project/GEOS-S2S_TC/data"
-DEFAULT_ATM_ROOT="/nobackupp27/afahad/GEOSS2S3_atm"
+DEFAULT_ATM_ROOT="/nobackupp17/afahad/GEOSS2S3_atm"
 
 if [[ -n "${TARGET_ROOT:-}" ]]; then
   SFC_ROOT="${SFC_ROOT:-${TARGET_ROOT}}"

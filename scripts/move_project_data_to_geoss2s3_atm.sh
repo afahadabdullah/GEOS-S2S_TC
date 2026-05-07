@@ -9,7 +9,7 @@ set -u
 umask 022
 
 SOURCE_ROOT="${SOURCE_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data/GEOS_fcst}"
-TARGET_ROOT="${TARGET_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm/GEOS_fcst}"
+TARGET_ROOT="${TARGET_ROOT:-/nobackupp17/afahad/GEOSS2S3_atm/GEOS_fcst}"
 DRY_RUN="${DRY_RUN:-1}"
 
 if [[ ! -d "${SOURCE_ROOT}" ]]; then

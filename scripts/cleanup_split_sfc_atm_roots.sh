@@ -13,7 +13,7 @@ set -u
 umask 022
 
 SFC_ROOT="${SFC_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
-ATM_ROOT="${ATM_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm}"
+ATM_ROOT="${ATM_ROOT:-/nobackupp17/afahad/GEOSS2S3_atm}"
 SFC_GEOS_ROOT="${SFC_GEOS_ROOT:-${SFC_ROOT%/}/GEOS_fcst}"
 ATM_GEOS_ROOT="${ATM_GEOS_ROOT:-${ATM_ROOT%/}/GEOS_fcst}"
 

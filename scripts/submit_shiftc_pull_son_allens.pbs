@@ -19,7 +19,7 @@
 #   qsub scripts/submit_shiftc_pull_son_allens.pbs
 #
 # Example explicit submit:
-#   qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data,ATM_ROOT=/nobackupp27/afahad/GEOSS2S3_atm /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_pull_son_allens.pbs
+#   qsub -v INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data,ATM_ROOT=/nobackupp17/afahad/GEOSS2S3_atm /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_shiftc_pull_son_allens.pbs
 
 set -u
 umask 022
@@ -31,7 +31,7 @@ INIT_DATES_FILE="${INIT_DATES_FILE:-}"
 REMOTE_HOST="${REMOTE_HOST:-lfe6}"
 REMOTE_ROOT="${REMOTE_ROOT:-/lou/la5/knakada/GEOSS2S3/GEOS_fcst}"
 DEFAULT_SFC_ROOT="/nobackupp27/afahad/project/GEOS-S2S_TC/data"
-DEFAULT_ATM_ROOT="/nobackupp27/afahad/GEOSS2S3_atm"
+DEFAULT_ATM_ROOT="/nobackupp17/afahad/GEOSS2S3_atm"
 
 if [[ -n "${TARGET_ROOT:-}" ]]; then
   SFC_ROOT="${SFC_ROOT:-${TARGET_ROOT}}"

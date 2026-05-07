@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_ATM_ROOT = "/nobackupp27/afahad/GEOSS2S3_atm"
+DEFAULT_ATM_ROOT = "/nobackupp17/afahad/GEOSS2S3_atm"
 DEFAULT_COLLECTION = "atm_inst_6hr_glo_L720x361_p49"
 DEFAULT_LEVELS_HPA = "1000,950,850,500,200"
 DONE_SUFFIX = ".vertical_slim_done"

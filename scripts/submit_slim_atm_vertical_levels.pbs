@@ -32,7 +32,7 @@ else
   REPO_ROOT="${SCRIPT_DIR%/scripts}"
 fi
 
-ATM_ROOT="${ATM_ROOT:-/nobackupp27/afahad/GEOSS2S3_atm}"
+ATM_ROOT="${ATM_ROOT:-/nobackupp17/afahad/GEOSS2S3_atm}"
 ATM_COLLECTION="${ATM_COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
 INIT_DATES_FILE="${INIT_DATES_FILE:-${REPO_ROOT}/config/init_dates_late_aug_1991_2024.txt}"
 FORECAST_MONTHS="${FORECAST_MONTHS:-}"
