@@ -23,6 +23,7 @@ GEOS-S2S_TC/
 |   |-- copy_geos_s2s3_ens1_sepnov.pbs
 |   |-- copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs
 |   |-- audit_atm_vs_sfc_progress.sh
+|   |-- summarize_collection_status.py
 |   |-- submit_shiftc_atm_from_sfc_missing.pbs
 |   |-- submit_shiftc_pull_son_allens.pbs
 |   |-- untar_and_slim_atm.py
@@ -194,6 +195,19 @@ State files include:
 - `next_index.txt`
 - `completed.ok`
 
+## Coverage Summaries
+
+Script:
+- [scripts/summarize_collection_status.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/summarize_collection_status.py)
+
+This script checks each expected init date, ensemble, and forecast month and classifies files as:
+- `untarred`: `.untar_done`, `.untar_slim_done`, or extracted `.nc4` files are present
+- `downloaded_not_untarred`: the monthly `.nc4.tar` file is present, but extracted files/markers are not
+- `submitted_not_downloaded`: only a `.shiftc_submitted` marker is present
+- `missing`: no tar, extracted files, or submitted marker are present
+
+It writes summary, init-level, detail-level, missing, and downloaded-not-untarred TSV files under the data root `reports/` directory.
+
 ## Submission Examples
 
 Update the repo on NAS:
@@ -225,6 +239,18 @@ Audit ATM coverage against the local SFC tree:
 
 ```bash
 bash scripts/audit_atm_vs_sfc_progress.sh
+```
+
+Summarize ATM download/untar coverage against the SFC reference tree:
+
+```bash
+env DATASET=atm FORECAST_MONTHS=09:10 python /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/summarize_collection_status.py
+```
+
+Summarize SFC download/untar coverage:
+
+```bash
+env DATASET=sfc FORECAST_MONTHS=09:10 python /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/summarize_collection_status.py
 ```
 
 Resume missing ATM transfers with shiftc from PFE:
