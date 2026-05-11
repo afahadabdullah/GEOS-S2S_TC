@@ -25,6 +25,8 @@ GEOS-S2S_TC/
 |   |-- audit_atm_vs_sfc_progress.sh
 |   |-- submit_shiftc_atm_from_sfc_missing.pbs
 |   |-- submit_shiftc_pull_son_allens.pbs
+|   |-- untar_and_slim_atm.py
+|   |-- submit_untar_slim_atm.pbs
 |   |-- slim_atm_vertical_levels.py
 |   |-- submit_slim_atm_vertical_levels.pbs
 |   |-- slim_sfc_variables.py
@@ -90,7 +92,28 @@ Defaults:
 - forecast months: `09 10 11`
 - ensembles: all `ens*` directories already represented in the local SFC tree
 
-### 3. Slim extracted ATM files to selected pressure levels
+### 3. Untar and slim ATM files in one compute job
+
+Scripts:
+- [scripts/untar_and_slim_atm.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/untar_and_slim_atm.py)
+- [scripts/submit_untar_slim_atm.pbs](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/submit_untar_slim_atm.pbs)
+
+Defaults:
+- ATM root: `/nobackupp17/afahad/GEOSS2S3_atm`
+- collection: `atm_inst_6hr_glo_L720x361_p49`
+- forecast months: `09 10`
+- kept pressure levels: `1000,950,850,500,200` hPa
+- compression: NetCDF4 zlib compression level `4`
+- conda environment: `earth`
+- queue/walltime: `normal` queue with `8:00:00` walltime
+- PBS resources: `select=1:ncpus=40:mpiprocs=40:model=sky_ele`
+- continuation: stops after `27000` seconds, about 7.5 hours, and resubmits itself if tar files remain
+- tar manifest: `/nobackupp17/afahad/GEOSS2S3_atm/job_state/atm_untar_slim_tar_manifest.tsv`
+- file manifest: `/nobackupp17/afahad/GEOSS2S3_atm/job_state/atm_untar_slim_file_manifest.tsv`
+
+The combined workflow extracts each monthly `.nc4.tar`, slims every extracted `.nc4` file to the requested pressure levels, and records both the tar-level progress and per-file slimming result. Existing `.untar_done` and `.vertical_slim_done` markers let reruns resume without repeating completed work.
+
+### 4. Slim extracted ATM files to selected pressure levels
 
 Scripts:
 - [scripts/slim_atm_vertical_levels.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/slim_atm_vertical_levels.py)
@@ -109,9 +132,7 @@ Defaults:
 
 The PBS wrapper activates the `earth` conda environment before running Python. The script rewrites each extracted `.nc4` file in place through a temporary file in the same directory. Variables with the pressure-level dimension are reduced to the selected levels; variables without that dimension are copied unchanged. Completed files get a `.vertical_slim_done` marker, so new runs skip files that were already processed. Near the 7.5-hour mark, the processor stops before starting another file and the PBS wrapper submits a continuation job.
 
-### 4. Legacy SFC scp workflow for ens1
-
-### 4. Slim extracted SFC files to TC variables
+### 5. Slim extracted SFC files to TC variables
 
 Scripts:
 - [scripts/slim_sfc_variables.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/slim_sfc_variables.py)
@@ -130,7 +151,7 @@ Defaults:
 
 The SFC slimmer removes every non-coordinate variable outside the keep list. It keeps coordinate/grid variables required by the retained variables, rewrites each `.nc4` in place through a temporary file, and writes `.sfc_var_slim_done` markers so reruns skip files already processed.
 
-### 5. Legacy SFC scp workflow for ens1
+### 6. Legacy SFC scp workflow for ens1
 
 Script:
 - [scripts/copy_geos_s2s3_ens1_sepnov.pbs](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/copy_geos_s2s3_ens1_sepnov.pbs)
@@ -140,7 +161,7 @@ Defaults:
 - init dates: `1999-2024`, late August
 - forecast months: `09 10 11`
 
-### 6. Legacy ATM scp workflow for ens1
+### 7. Legacy ATM scp workflow for ens1
 
 Script:
 - [scripts/copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/copy_geos_s2s3_ens1_sepnov_atm_inst6hr_p49.pbs)
@@ -211,6 +232,20 @@ Resume missing ATM transfers with shiftc from PFE:
 ```bash
 env SFC_ROOT=/nobackupp27/afahad/project/GEOS-S2S_TC/data ATM_ROOT=/nobackupp17/afahad/GEOSS2S3_atm INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt bash scripts/submit_shiftc_atm_from_sfc_missing.pbs
 ```
+
+Untar downloaded ATM tar files and slim the extracted files in the same compute job:
+
+```bash
+qsub -v ATM_ROOT=/nobackupp17/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,FORECAST_MONTHS=09:10,CONDA_ENV=earth /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_untar_slim_atm.pbs
+```
+
+For a small tar-level test first:
+
+```bash
+qsub -v ATM_ROOT=/nobackupp17/afahad/GEOSS2S3_atm,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,FORECAST_MONTHS=09:10,MAX_TARS=1,CONDA_ENV=earth /nobackupp27/afahad/project/GEOS-S2S_TC/scripts/submit_untar_slim_atm.pbs
+```
+
+To remove monthly tar files after successful untar and slimming, add `DELETE_TAR_AFTER_SUCCESS=1` to the `qsub -v` list.
 
 Slim already-extracted ATM `.nc4` files on compute nodes:
 

@@ -1,0 +1,264 @@
+#!/bin/bash -l
+
+#######################################################################
+#                     Batch Parameters for Run Job
+#######################################################################
+
+#PBS -l walltime=8:00:00
+#PBS -l select=1:ncpus=40:mpiprocs=40:model=sky_ele
+#PBS -N geos_atm_untar_slim
+#PBS -q normal
+#PBS -W group_list=s2406
+#PBS -j oe -k oed
+
+# Untar downloaded ATM monthly tar files and immediately slim extracted .nc4
+# files to selected pressure levels. The Python driver writes separate tar and
+# file manifests plus restart markers, and this wrapper resubmits before the
+# walltime limit when work remains.
+
+set -u
+umask 022
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+SCRIPT_NAME="submit_untar_slim_atm.pbs"
+RESUBMIT_SCRIPT="${RESUBMIT_SCRIPT:-}"
+JOB_START_EPOCH="$(date +%s)"
+
+if [[ -d "${SUBMIT_DIR}/scripts" ]]; then
+  REPO_ROOT="${SUBMIT_DIR}"
+elif [[ "$(basename "${SUBMIT_DIR}")" == "scripts" ]]; then
+  REPO_ROOT="${SUBMIT_DIR%/scripts}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  REPO_ROOT="${SCRIPT_DIR%/scripts}"
+fi
+
+ATM_ROOT="${ATM_ROOT:-/nobackupp17/afahad/GEOSS2S3_atm}"
+ATM_COLLECTION="${ATM_COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
+INIT_DATES_FILE="${INIT_DATES_FILE:-${REPO_ROOT}/config/init_dates_late_aug_1991_2024.txt}"
+FORECAST_MONTHS="${FORECAST_MONTHS:-09 10}"
+LEVELS_HPA="${LEVELS_HPA:-1000,950,850,500,200}"
+LEVEL_TOLERANCE_HPA="${LEVEL_TOLERANCE_HPA:-0.5}"
+COMPLEVEL="${COMPLEVEL:-4}"
+MAX_TARS="${MAX_TARS:-0}"
+FORCE="${FORCE:-0}"
+FORCE_UNTAR="${FORCE_UNTAR:-0}"
+DELETE_TAR_AFTER_SUCCESS="${DELETE_TAR_AFTER_SUCCESS:-0}"
+DRY_RUN="${DRY_RUN:-0}"
+ELAPSED_LIMIT_SECONDS="${ELAPSED_LIMIT_SECONDS:-27000}"
+STOP_AFTER_SECONDS="${STOP_AFTER_SECONDS:-${ELAPSED_LIMIT_SECONDS}}"
+CONDA_ENV="${CONDA_ENV:-earth}"
+CONDA_BASE="${CONDA_BASE:-}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+TAR_MANIFEST_FILE="${TAR_MANIFEST_FILE:-${ATM_ROOT}/job_state/atm_untar_slim_tar_manifest.tsv}"
+SLIM_MANIFEST_FILE="${SLIM_MANIFEST_FILE:-${ATM_ROOT}/job_state/atm_untar_slim_file_manifest.tsv}"
+
+resolve_conda_base() {
+  local candidate
+  local candidates=()
+
+  if [[ -n "${CONDA_BASE}" && -d "${CONDA_BASE}" ]]; then
+    return 0
+  fi
+
+  if command -v conda >/dev/null 2>&1; then
+    CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+    if [[ -n "${CONDA_BASE}" && -d "${CONDA_BASE}" ]]; then
+      return 0
+    fi
+  fi
+
+  candidates=(
+    "${HOME:-}/miniconda3"
+    "${HOME:-}/miniforge3"
+    "${HOME:-}/anaconda3"
+    "/nobackupnfs1/afahad/miniconda3"
+    "/nobackupnfs1/afahad/miniforge3"
+    "/nobackupp27/afahad/miniconda3"
+    "/nobackupp27/afahad/miniforge3"
+    "/nobackupp27/afahad/anaconda3"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "${candidate}" && -d "${candidate}" ]]; then
+      CONDA_BASE="${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+activate_conda_env() {
+  local activate_status
+
+  if [[ -z "${CONDA_ENV}" || "${CONDA_ENV}" == "none" ]]; then
+    echo "Skipping conda activation because CONDA_ENV=${CONDA_ENV}"
+    return 0
+  fi
+
+  if ! resolve_conda_base; then
+    echo "ERROR could not find conda base."
+    echo "Pass it explicitly, for example:"
+    echo "  qsub -v CONDA_BASE=/path/to/miniconda3,CONDA_ENV=${CONDA_ENV} ..."
+    return 1
+  fi
+
+  if [[ -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
+    set +u
+    # shellcheck disable=SC1091
+    source "${CONDA_BASE}/etc/profile.d/conda.sh"
+    conda activate "${CONDA_ENV}"
+    activate_status=$?
+    set -u
+    return "${activate_status}"
+  elif [[ -f "${CONDA_BASE}/bin/activate" ]]; then
+    set +u
+    # shellcheck disable=SC1091
+    source "${CONDA_BASE}/bin/activate" "${CONDA_ENV}"
+    activate_status=$?
+    set -u
+    return "${activate_status}"
+  fi
+
+  echo "ERROR conda activation scripts not found under CONDA_BASE=${CONDA_BASE}"
+  return 1
+}
+
+resolve_resubmit_script() {
+  local candidate
+  local candidates=()
+
+  if [[ "${RESUBMIT_SCRIPT}" == /var/spool/pbs/* ]]; then
+    echo "Ignoring spool-based RESUBMIT_SCRIPT=${RESUBMIT_SCRIPT}"
+    RESUBMIT_SCRIPT=""
+  fi
+
+  if [[ -n "${RESUBMIT_SCRIPT}" && -f "${RESUBMIT_SCRIPT}" ]]; then
+    return 0
+  fi
+
+  candidates=(
+    "${REPO_ROOT}/scripts/${SCRIPT_NAME}"
+    "${SUBMIT_DIR}/${SCRIPT_NAME}"
+    "${SUBMIT_DIR}/scripts/${SCRIPT_NAME}"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      RESUBMIT_SCRIPT="${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+resubmit_job() {
+  local new_job_id
+
+  if ! resolve_resubmit_script; then
+    echo "ERROR could not resolve RESUBMIT_SCRIPT for continuation."
+    echo "Pass it explicitly with:"
+    echo "  qsub -v RESUBMIT_SCRIPT=/full/path/to/${SCRIPT_NAME} ${SCRIPT_NAME}"
+    return 1
+  fi
+
+  export ATM_ROOT ATM_COLLECTION INIT_DATES_FILE FORECAST_MONTHS
+  export LEVELS_HPA LEVEL_TOLERANCE_HPA COMPLEVEL MAX_TARS
+  export FORCE FORCE_UNTAR DELETE_TAR_AFTER_SUCCESS DRY_RUN
+  export TAR_MANIFEST_FILE SLIM_MANIFEST_FILE
+  export ELAPSED_LIMIT_SECONDS STOP_AFTER_SECONDS
+  export CONDA_ENV CONDA_BASE PYTHON_BIN RESUBMIT_SCRIPT
+
+  if new_job_id=$(qsub -V "${RESUBMIT_SCRIPT}"); then
+    echo "Submitted continuation job: ${new_job_id}"
+    return 0
+  fi
+
+  echo "ERROR qsub resubmission failed for ${RESUBMIT_SCRIPT}"
+  return 1
+}
+
+echo "Job started: $(date)"
+echo "REPO_ROOT=${REPO_ROOT}"
+echo "ATM_ROOT=${ATM_ROOT}"
+echo "ATM_COLLECTION=${ATM_COLLECTION}"
+echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
+echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
+echo "LEVELS_HPA=${LEVELS_HPA}"
+echo "LEVEL_TOLERANCE_HPA=${LEVEL_TOLERANCE_HPA}"
+echo "COMPLEVEL=${COMPLEVEL}"
+echo "MAX_TARS=${MAX_TARS}"
+echo "FORCE=${FORCE}"
+echo "FORCE_UNTAR=${FORCE_UNTAR}"
+echo "DELETE_TAR_AFTER_SUCCESS=${DELETE_TAR_AFTER_SUCCESS}"
+echo "DRY_RUN=${DRY_RUN}"
+echo "ELAPSED_LIMIT_SECONDS=${ELAPSED_LIMIT_SECONDS}"
+echo "STOP_AFTER_SECONDS=${STOP_AFTER_SECONDS}"
+echo "CONDA_ENV=${CONDA_ENV}"
+echo "CONDA_BASE=${CONDA_BASE:-auto}"
+echo "TAR_MANIFEST_FILE=${TAR_MANIFEST_FILE}"
+echo "SLIM_MANIFEST_FILE=${SLIM_MANIFEST_FILE}"
+
+cd "${REPO_ROOT}"
+mkdir -p "${ATM_ROOT}/job_state"
+
+if ! activate_conda_env; then
+  exit 6
+fi
+
+if [[ -z "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)"
+fi
+
+if [[ -z "${PYTHON_BIN}" ]]; then
+  echo "ERROR python was not found after conda activation."
+  exit 7
+fi
+
+echo "ACTIVE_CONDA_PREFIX=${CONDA_PREFIX:-}"
+echo "PYTHON_BIN=${PYTHON_BIN}"
+"${PYTHON_BIN}" - <<'PY'
+import netCDF4
+import numpy
+print("Python dependency check passed: netCDF4 and numpy are available")
+PY
+dep_status=$?
+if (( dep_status != 0 )); then
+  echo "ERROR Python dependency check failed in CONDA_ENV=${CONDA_ENV}"
+  exit 8
+fi
+
+export ATM_ROOT ATM_COLLECTION INIT_DATES_FILE FORECAST_MONTHS
+export LEVELS_HPA LEVEL_TOLERANCE_HPA COMPLEVEL MAX_TARS
+export FORCE FORCE_UNTAR DELETE_TAR_AFTER_SUCCESS DRY_RUN
+export TAR_MANIFEST_FILE SLIM_MANIFEST_FILE STOP_AFTER_SECONDS ELAPSED_LIMIT_SECONDS JOB_START_EPOCH
+
+"${PYTHON_BIN}" scripts/untar_and_slim_atm.py \
+  --atm-root "${ATM_ROOT}" \
+  --collection "${ATM_COLLECTION}" \
+  --init-dates-file "${INIT_DATES_FILE}" \
+  --forecast-months "${FORECAST_MONTHS}" \
+  --levels-hpa "${LEVELS_HPA}" \
+  --tolerance-hpa "${LEVEL_TOLERANCE_HPA}" \
+  --complevel "${COMPLEVEL}" \
+  --tar-manifest "${TAR_MANIFEST_FILE}" \
+  --slim-manifest "${SLIM_MANIFEST_FILE}" \
+  --max-tars "${MAX_TARS}" \
+  --stop-after-seconds "${STOP_AFTER_SECONDS}" \
+  --job-start-epoch "${JOB_START_EPOCH}"
+
+status=$?
+echo "Job finished: $(date)"
+echo "Exit status: ${status}"
+
+if (( status == 75 )); then
+  echo "Python stopped before walltime limit with files remaining; resubmitting continuation."
+  if resubmit_job; then
+    exit 0
+  fi
+  exit 9
+fi
+
+exit "${status}"
