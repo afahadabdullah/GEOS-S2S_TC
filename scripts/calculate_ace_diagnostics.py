@@ -51,37 +51,37 @@ BASINS = {
         "lat_range": (0.0, 60.0),
         "lon_range": (-100.0, -10.0),
         "color": "#e55934",
-        "label_xy": (-55.0, 30.0)
+        "label_xy": (-45.0, 48.0)
     },
     "Northeast Pacific": {
         "lat_range": (0.0, 40.0),
         "lon_range": (-180.0, -100.0),
         "color": "#f3a712",
-        "label_xy": (-140.0, 20.0)
+        "label_xy": (-135.0, 32.0)
     },
     "Northwest Pacific": {
         "lat_range": (0.0, 60.0),
         "lon_range": (100.0, 180.0),
         "color": "#2ec4b6",
-        "label_xy": (140.0, 30.0)
+        "label_xy": (138.0, 48.0)
     },
     "North Indian": {
         "lat_range": (0.0, 40.0),
         "lon_range": (40.0, 100.0),
         "color": "#9b5de5",
-        "label_xy": (70.0, 20.0)
+        "label_xy": (70.0, 32.0)
     },
     "South Indian": {
         "lat_range": (-40.0, 0.0),
         "lon_range": (20.0, 135.0),
         "color": "#00bbf9",
-        "label_xy": (77.0, -20.0)
+        "label_xy": (80.0, -32.0)
     },
     "South Pacific": {
         "lat_range": (-40.0, 0.0),
         "lon_ranges": [(135.0, 180.0), (-180.0, -120.0)],
         "color": "#ff007f",
-        "label_xy": (-160.0, -20.0)
+        "label_xy": (-155.0, -32.0)
     }
 }
 
