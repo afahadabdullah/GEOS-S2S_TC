@@ -1,0 +1,12 @@
+# Local data and scratch directories
+data/
+
+# Python caching and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# OS specific files
+.DS_Store
