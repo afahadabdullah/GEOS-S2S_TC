@@ -582,6 +582,11 @@ def plot_ace_diagnostics(
     plt.rcParams["axes.edgecolor"] = "#cccccc"
     plt.rcParams["axes.linewidth"] = 0.8
 
+    from matplotlib.colors import LinearSegmentedColormap
+    # Define custom ACE colormap matching the WMO reference style (not darker starting, green -> yellow -> orange -> red -> pink -> white)
+    colors = ["#4d924d", "#95d5b2", "#ffeb3b", "#ffa726", "#e65100", "#c2185b", "#ffffff"]
+    ace_cmap = LinearSegmentedColormap.from_list("wmo_ace", colors, N=256)
+
     # --------------------------------------------------------------------------
     # PLOT 1: SPATIAL ACE MAP (NORTH ATLANTIC FOCUS)
     # --------------------------------------------------------------------------
@@ -595,48 +600,50 @@ def plot_ace_diagnostics(
         # Extent bounds: [West Lon, East Lon, South Lat, North Lat]
         ax.set_extent([-98.0, -15.0, 5.0, 42.0], crs=ccrs.PlateCarree())
         
-        # Add high-quality features (ocean, land, coastlines, borders)
-        ax.add_feature(cfeature.OCEAN, facecolor="#11151c", zorder=0)  # Dark theme ocean
-        ax.add_feature(cfeature.LAND, facecolor="#1e222a", zorder=1)   # Slate gray land
-        ax.add_feature(cfeature.COASTLINE, edgecolor="#4f5b66", linewidth=0.6, zorder=2)
-        ax.add_feature(cfeature.BORDERS, edgecolor="#4f5b66", linewidth=0.4, linestyle=":", zorder=2)
+        # Add high-quality features (ocean first, zorder=0)
+        ax.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)  # Light pastel blue ocean
         
-        # Plot spatial ACE contours
+        # Plot spatial ACE contours under the land
         lons_shifted = (longitudes + 180) % 360 - 180
         sorted_idx = np.argsort(lons_shifted)
         lons_plot = lons_shifted[sorted_idx]
         ace_plot = local_ace[:, sorted_idx]
         
-        # Levels for ACE (only plot active storm energy > 0)
-        levels = np.linspace(0.1, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.1 else 10.0, 100)
+        # Levels for ACE (only plot active storm energy > 0.05)
+        levels = np.linspace(0.05, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.05 else 10.0, 100)
         
         contour = ax.contourf(
             lons_plot, latitudes, ace_plot,
             levels=levels,
             transform=ccrs.PlateCarree(),
-            cmap="magma",
-            zorder=3,
-            alpha=0.85
+            cmap=ace_cmap,
+            zorder=1,   # Contours drawn on top of ocean, under land
+            alpha=0.9
         )
         
+        # Add land on top of contours to mask anything over land (zorder=2)
+        ax.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=2)   # Premium light-beige land
+        ax.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.6, zorder=3)
+        ax.add_feature(cfeature.BORDERS, edgecolor="#bbbbbb", linewidth=0.4, linestyle=":", zorder=3)
+        
         # Add grid lines
-        gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="#4f5b66", alpha=0.5, linestyle="--")
+        gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--", zorder=4)
         gl.top_labels = False
         gl.right_labels = False
-        gl.xlabel_style = {"size": 8, "color": "#777777"}
-        gl.ylabel_style = {"size": 8, "color": "#777777"}
+        gl.xlabel_style = {"size": 8, "color": "#555555"}
+        gl.ylabel_style = {"size": 8, "color": "#555555"}
         
     else:
         # Standard axes fallback if Cartopy is not available
         ax = fig1.add_subplot(1, 1, 1)
-        ax.set_facecolor("#11151c")
-        levels = np.linspace(0.1, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.1 else 10.0, 100)
-        contour = ax.contourf(longitudes, latitudes, local_ace, levels=levels, cmap="magma")
+        ax.set_facecolor("#daeefb")
+        levels = np.linspace(0.05, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.05 else 10.0, 100)
+        contour = ax.contourf(longitudes, latitudes, local_ace, levels=levels, cmap=ace_cmap)
         ax.set_xlim([-98.0, -15.0])
         ax.set_ylim([5.0, 42.0])
         ax.set_xlabel("Longitude")
         ax.set_ylabel("Latitude")
-        ax.grid(True, linewidth=0.3, color="#4f5b66", alpha=0.5, linestyle="--")
+        ax.grid(True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--")
 
     # Add a beautiful colorbar
     cbar = fig1.colorbar(contour, ax=ax, orientation="horizontal", pad=0.08, aspect=40, shrink=0.8)
@@ -719,47 +726,49 @@ def plot_ace_diagnostics(
         
         ax3.set_global()
         
-        # Add high-quality features (ocean, land, coastlines, borders)
-        ax3.add_feature(cfeature.OCEAN, facecolor="#11151c", zorder=0)  # Dark theme ocean
-        ax3.add_feature(cfeature.LAND, facecolor="#1e222a", zorder=1)   # Slate gray land
-        ax3.add_feature(cfeature.COASTLINE, edgecolor="#4f5b66", linewidth=0.5, zorder=2)
-        ax3.add_feature(cfeature.BORDERS, edgecolor="#4f5b66", linewidth=0.3, linestyle=":", zorder=2)
+        # Add high-quality features (ocean first, zorder=0)
+        ax3.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)  # Light pastel blue ocean
         
-        # Plot spatial ACE contours globally
+        # Plot spatial ACE contours globally under the land
         lons_shifted = (longitudes + 180) % 360 - 180
         sorted_idx = np.argsort(lons_shifted)
         lons_plot = lons_shifted[sorted_idx]
         ace_plot = local_ace[:, sorted_idx]
         
-        levels = np.linspace(0.1, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.1 else 10.0, 100)
+        levels = np.linspace(0.05, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.05 else 10.0, 100)
         
         contour3 = ax3.contourf(
             lons_plot, latitudes, ace_plot,
             levels=levels,
             transform=ccrs.PlateCarree(),
-            cmap="magma",
-            zorder=3,
-            alpha=0.85
+            cmap=ace_cmap,
+            zorder=1,   # Contours drawn on top of ocean, under land
+            alpha=0.9
         )
         
+        # Add land on top of contours to mask anything over land (zorder=2)
+        ax3.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=2)   # Premium light-beige land
+        ax3.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.5, zorder=3)
+        ax3.add_feature(cfeature.BORDERS, edgecolor="#bbbbbb", linewidth=0.3, linestyle=":", zorder=3)
+        
         # Add grid lines
-        gl3 = ax3.gridlines(draw_labels=True, linewidth=0.2, color="#4f5b66", alpha=0.4, linestyle="--")
+        gl3 = ax3.gridlines(draw_labels=True, linewidth=0.2, color="#aaaaaa", alpha=0.4, linestyle="--", zorder=4)
         gl3.top_labels = False
         gl3.right_labels = False
-        gl3.xlabel_style = {"size": 8, "color": "#777777"}
-        gl3.ylabel_style = {"size": 8, "color": "#777777"}
+        gl3.xlabel_style = {"size": 8, "color": "#555555"}
+        gl3.ylabel_style = {"size": 8, "color": "#555555"}
         
     else:
         # Standard axes fallback
         ax3 = fig3.add_subplot(1, 1, 1)
-        ax3.set_facecolor("#11151c")
-        levels = np.linspace(0.1, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.1 else 10.0, 100)
-        contour3 = ax3.contourf(longitudes, latitudes, local_ace, levels=levels, cmap="magma")
+        ax3.set_facecolor("#daeefb")
+        levels = np.linspace(0.05, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.05 else 10.0, 100)
+        contour3 = ax3.contourf(longitudes, latitudes, local_ace, levels=levels, cmap=ace_cmap)
         ax3.set_xlim([-180.0, 180.0])
         ax3.set_ylim([-60.0, 60.0])
         ax3.set_xlabel("Longitude")
         ax3.set_ylabel("Latitude")
-        ax3.grid(True, linewidth=0.2, color="#4f5b66", alpha=0.4, linestyle="--")
+        ax3.grid(True, linewidth=0.2, color="#aaaaaa", alpha=0.4, linestyle="--")
 
     # Draw basin boundary rectangles and labels
     for name, b_def in BASINS.items():
@@ -771,41 +780,41 @@ def plot_ace_diagnostics(
         if basin_cumulative_ace and name in basin_cumulative_ace:
             total_ace = basin_cumulative_ace[name][-1]
             
-        # Draw rectangular boundaries
+        # Draw rectangular boundaries (using solid line '-' for neat appearance)
         if "lon_range" in b_def:
             lon_min, lon_max = b_def["lon_range"]
             lons_rect = [lon_min, lon_max, lon_max, lon_min, lon_min]
             lats_rect = [lat_min, lat_min, lat_max, lat_max, lat_min]
             if HAS_CARTOPY:
-                ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.5, linestyle="--", transform=ccrs.PlateCarree(), zorder=4)
+                ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.8, linestyle="-", transform=ccrs.PlateCarree(), zorder=5)
             else:
-                ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.5, linestyle="--", zorder=4)
+                ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.8, linestyle="-", zorder=5)
         else:
             # Split-meridian case (South Pacific)
             for lon_min, lon_max in b_def["lon_ranges"]:
                 lons_rect = [lon_min, lon_max, lon_max, lon_min, lon_min]
                 lats_rect = [lat_min, lat_min, lat_max, lat_max, lat_min]
                 if HAS_CARTOPY:
-                    ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.5, linestyle="--", transform=ccrs.PlateCarree(), zorder=4)
+                    ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.8, linestyle="-", transform=ccrs.PlateCarree(), zorder=5)
                 else:
-                    ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.5, linestyle="--", zorder=4)
+                    ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.8, linestyle="-", zorder=5)
                     
-        # Place label inside or near the box
+        # Place label inside or near the box (using premium light theme labels)
         label_lon, label_lat = b_def["label_xy"]
-        bbox_props = dict(boxstyle="round,pad=0.3", fc="#11151c", ec=color, lw=1.2, alpha=0.85)
+        bbox_props = dict(boxstyle="round,pad=0.3", fc="#ffffff", ec=color, lw=1.2, alpha=0.9)
         
         if HAS_CARTOPY:
             ax3.text(
                 label_lon, label_lat, f"{name}\nACE: {total_ace:.2f}",
                 transform=ccrs.PlateCarree(),
-                color="#ffffff", fontsize=8, fontweight="bold",
-                ha="center", va="center", bbox=bbox_props, zorder=5
+                color="#1e222a", fontsize=8, fontweight="bold",
+                ha="center", va="center", bbox=bbox_props, zorder=6
             )
         else:
             ax3.text(
                 label_lon, label_lat, f"{name}\nACE: {total_ace:.2f}",
-                color="#ffffff", fontsize=8, fontweight="bold",
-                ha="center", va="center", bbox=bbox_props, zorder=5
+                color="#1e222a", fontsize=8, fontweight="bold",
+                ha="center", va="center", bbox=bbox_props, zorder=6
             )
 
     # Add global colorbar
