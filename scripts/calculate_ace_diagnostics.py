@@ -45,6 +45,46 @@ except ImportError:
 MPS_TO_KNOTS = 1.94384
 TS_THRESHOLD_KNOTS = 34.0  # Tropical Storm threshold (34 knots / 17.5 m/s)
 
+# Standard Global Tropical Cyclone Basin Boundaries
+BASINS = {
+    "North Atlantic": {
+        "lat_range": (0.0, 60.0),
+        "lon_range": (-100.0, -10.0),
+        "color": "#e55934",
+        "label_xy": (-55.0, 30.0)
+    },
+    "Northeast Pacific": {
+        "lat_range": (0.0, 40.0),
+        "lon_range": (-180.0, -100.0),
+        "color": "#f3a712",
+        "label_xy": (-140.0, 20.0)
+    },
+    "Northwest Pacific": {
+        "lat_range": (0.0, 60.0),
+        "lon_range": (100.0, 180.0),
+        "color": "#2ec4b6",
+        "label_xy": (140.0, 30.0)
+    },
+    "North Indian": {
+        "lat_range": (0.0, 40.0),
+        "lon_range": (40.0, 100.0),
+        "color": "#9b5de5",
+        "label_xy": (70.0, 20.0)
+    },
+    "South Indian": {
+        "lat_range": (-40.0, 0.0),
+        "lon_range": (20.0, 135.0),
+        "color": "#00bbf9",
+        "label_xy": (77.0, -20.0)
+    },
+    "South Pacific": {
+        "lat_range": (-40.0, 0.0),
+        "lon_ranges": [(135.0, 180.0), (-180.0, -120.0)],
+        "color": "#ff007f",
+        "label_xy": (-160.0, -20.0)
+    }
+}
+
 
 def calculate_local_ace(us: np.ndarray, vs: np.ndarray, sampling_hours: int = 6) -> np.ndarray:
     """Calculate the Local Grid-Point ACE index.
@@ -115,30 +155,63 @@ def generate_mock_geos_dataset(
     lats = np.linspace(-90, 90, nlat, dtype=np.float32)
     lon_grid, lat_grid = np.meshgrid(lons, lats)
     
-    # Define realistic tropical cyclone trajectories for Sept, Oct, Nov
-    # Each storm has: (start_day, end_day, start_lat, start_lon, end_lat, end_lon, max_wind_knots, max_radius_degrees)
+    # Define realistic global tropical cyclone trajectories for Sept, Oct, Nov
+    # Each storm has: (start_day, end_day, start_lat, start_lon, end_lat, end_lon, max_wind, radius, hemi)
     tc_tracks = {
-        "09": {  # September Storm: Major Cape Verde hurricane moving toward the US East Coast
-            "start": 5, "end": 22,
-            "start_lat": 12.0, "start_lon": -30.0,
-            "end_lat": 32.0, "end_lon": -78.0,
-            "max_wind": 62.0,  # m/s (~120 knots, Cat 4)
-            "radius": 2.0
-        },
-        "10": {  # October Storm: Western Caribbean storm moving northeast across Florida
-            "start": 8, "end": 18,
-            "start_lat": 13.0, "start_lon": -82.0,
-            "end_lat": 29.0, "end_lon": -60.0,
-            "max_wind": 45.0,  # m/s (~90 knots, Cat 2)
-            "radius": 2.5
-        },
-        "11": {  # November Storm: Late-season storm curving out to sea in the Atlantic
-            "start": 2, "end": 12,
-            "start_lat": 15.0, "start_lon": -65.0,
-            "end_lat": 38.0, "end_lon": -40.0,
-            "max_wind": 30.0,  # m/s (~60 knots, Tropical Storm)
-            "radius": 3.0
-        }
+        "09": [
+            {  # September NATL Storm: Major Cape Verde hurricane moving toward the US East Coast
+                "start": 5, "end": 22,
+                "start_lat": 12.0, "start_lon": -30.0,
+                "end_lat": 32.0, "end_lon": -78.0,
+                "max_wind": 62.0, "radius": 2.0, "hemi": "N"
+            },
+            {  # September WPAC Typhoon: Super typhoon heading toward Taiwan/China
+                "start": 8, "end": 25,
+                "start_lat": 10.0, "start_lon": 150.0,
+                "end_lat": 24.0, "end_lon": 122.0,
+                "max_wind": 75.0, "radius": 2.5, "hemi": "N"
+            },
+            {  # September EPAC Hurricane: Out to sea
+                "start": 12, "end": 22,
+                "start_lat": 13.0, "start_lon": -100.0,
+                "end_lat": 22.0, "end_lon": -135.0,
+                "max_wind": 50.0, "radius": 2.2, "hemi": "N"
+            }
+        ],
+        "10": [
+            {  # October NATL Storm: Western Caribbean storm moving northeast across Florida
+                "start": 8, "end": 18,
+                "start_lat": 13.0, "start_lon": -82.0,
+                "end_lat": 29.0, "end_lon": -60.0,
+                "max_wind": 45.0, "radius": 2.5, "hemi": "N"
+            },
+            {  # October NIND Cyclone: Bay of Bengal storm hitting India
+                "start": 12, "end": 20,
+                "start_lat": 9.0, "start_lon": 90.0,
+                "end_lat": 19.0, "end_lon": 82.0,
+                "max_wind": 42.0, "radius": 2.0, "hemi": "N"
+            }
+        ],
+        "11": [
+            {  # November NATL Storm: Late-season storm curving out to sea in the Atlantic
+                "start": 2, "end": 12,
+                "start_lat": 15.0, "start_lon": -65.0,
+                "end_lat": 38.0, "end_lon": -40.0,
+                "max_wind": 30.0, "radius": 3.0, "hemi": "N"
+            },
+            {  # November SIND Cyclone: Southern Indian Ocean storm (Southern Hemisphere - Clockwise flow!)
+                "start": 5, "end": 18,
+                "start_lat": -10.0, "start_lon": 90.0,
+                "end_lat": -22.0, "end_lon": 68.0,
+                "max_wind": 48.0, "radius": 2.4, "hemi": "S"
+            },
+            {  # November SPAC Cyclone: South Pacific storm crossing the dateline (Southern Hemisphere)
+                "start": 10, "end": 22,
+                "start_lat": -12.0, "start_lon": 165.0,
+                "end_lat": -25.0, "end_lon": -165.0,
+                "max_wind": 52.0, "radius": 2.6, "hemi": "S"
+            }
+        ]
     }
     
     init_year = init_date[:4]
@@ -164,40 +237,49 @@ def generate_mock_geos_dataset(
             us_background[t, :, :] = -6.0 * np.exp(-((lat_grid - 12.0) / 8.0)**2) + 8.0 * np.exp(-((lat_grid - 40.0) / 10.0)**2)
             vs_background[t, :, :] = -1.0 * np.exp(-((lat_grid - 12.0) / 8.0)**2)
             
-        # Inject storm vortex if there's a active TC track for this month
+        # Inject storm vortices if there are active TC tracks for this month
         if month in tc_tracks:
-            track = tc_tracks[month]
-            for step in range(n_times):
-                day = step / steps_per_day
-                if track["start"] <= day <= track["end"]:
-                    # Interpolate current storm position
-                    frac = (day - track["start"]) / (track["end"] - track["start"])
-                    c_lat = track["start_lat"] + frac * (track["end_lat"] - track["start_lat"])
-                    c_lon = track["start_lon"] + frac * (track["end_lon"] - track["start_lon"])
-                    
-                    # Maximum wind speed for current day (ramps up, then decays)
-                    # Quadratic envelope for peak intensity in middle of track
-                    intensity_envelope = 4.0 * frac * (1.0 - frac)
-                    v_max = track["max_wind"] * (0.3 + 0.7 * intensity_envelope)
-                    r_max = track["radius"]
-                    
-                    # Compute distance to storm center on sphere (approximate degrees)
-                    d_lon = (lon_grid - c_lon + 180) % 360 - 180
-                    d_lat = lat_grid - c_lat
-                    dist = np.sqrt(d_lon**2 + d_lat**2)
-                    
-                    # Cyclonic vortex wind profiles: V(r) = Vmax * (r/Rmax) * exp(1 - r/Rmax)
-                    # Add small eps to prevent division by zero
-                    r_eps = dist + 1e-5
-                    v_theta = v_max * (r_eps / r_max) * np.exp(1.0 - r_eps / r_max)
-                    
-                    # Compute wind components (counter-clockwise cyclonic flow in Northern Hemisphere)
-                    u_vortex = -v_theta * (d_lat / r_eps)
-                    v_vortex = v_theta * (d_lon / r_eps)
-                    
-                    # Superimpose onto background wind field
-                    us_background[step, :, :] += u_vortex
-                    vs_background[step, :, :] += v_vortex
+            for track in tc_tracks[month]:
+                for step in range(n_times):
+                    day = step / steps_per_day
+                    if track["start"] <= day <= track["end"]:
+                        # Interpolate current storm position
+                        frac = (day - track["start"]) / (track["end"] - track["start"])
+                        c_lat = track["start_lat"] + frac * (track["end_lat"] - track["start_lat"])
+                        
+                        # Handle longitude interpolation, especially when crossing the 180 meridian
+                        start_lon = track["start_lon"]
+                        end_lon = track["end_lon"]
+                        if abs(end_lon - start_lon) > 180:
+                            if end_lon < start_lon:
+                                end_lon += 360
+                            else:
+                                start_lon += 360
+                        c_lon = start_lon + frac * (end_lon - start_lon)
+                        c_lon = (c_lon + 180) % 360 - 180
+                        
+                        # Maximum wind speed for current day (ramps up, then decays)
+                        intensity_envelope = 4.0 * frac * (1.0 - frac)
+                        v_max = track["max_wind"] * (0.3 + 0.7 * intensity_envelope)
+                        r_max = track["radius"]
+                        
+                        # Compute distance to storm center on sphere (approximate degrees)
+                        d_lon = (lon_grid - c_lon + 180) % 360 - 180
+                        d_lat = lat_grid - c_lat
+                        dist = np.sqrt(d_lon**2 + d_lat**2)
+                        
+                        # Cyclonic vortex wind profiles: V(r) = Vmax * (r/Rmax) * exp(1 - r/Rmax)
+                        r_eps = dist + 1e-5
+                        v_theta = v_max * (r_eps / r_max) * np.exp(1.0 - r_eps / r_max)
+                        
+                        # Compute wind components (Northern = counter-clockwise, Southern = clockwise)
+                        hemi_sign = 1.0 if track.get("hemi", "N") == "N" else -1.0
+                        u_vortex = -hemi_sign * v_theta * (d_lat / r_eps)
+                        v_vortex = hemi_sign * v_theta * (d_lon / r_eps)
+                        
+                        # Superimpose onto background wind field
+                        us_background[step, :, :] += u_vortex
+                        vs_background[step, :, :] += v_vortex
         
         # Write to compressed NetCDF4 file
         with netCDF4.Dataset(file_path, "w", format="NETCDF4") as nc:
@@ -355,35 +437,59 @@ def process_ace_diagnostics(
     print("  Calculating Local ACE map...")
     local_ace = calculate_local_ace(us_full, vs_full, sampling_hours=time_diff_hours)
     
-    # 4. Calculate Time Series of Cumulative ACE (Basin-wide or Global)
-    # Standard: North Atlantic basin boundary for TC indices is: 0-60N, -100 to -10W
-    lat_indices = np.where((latitudes >= 0.0) & (latitudes <= 60.0))[0]
-    lon_indices = np.where((longitudes >= -100.0) & (longitudes <= -10.0))[0]
-    
-    print(f"  Calculating temporal basin-wide cumulative ACE (Domain: 0-60N, 100W-10W)...")
-    cumulative_ace_time = []
-    current_ts_ace_sum = 0.0
-    
-    # Track daily accumulation curves
-    # To match NOAA 6-hour standard, we accumulate step by step
+    # 4. Calculate Time Series of Cumulative ACE for All Basins
+    print("  Calculating temporal cumulative ACE for all global basins...")
+    basin_cumulative_ace = {name: [] for name in BASINS}
+    basin_totals = {name: 0.0 for name in BASINS}
     scale_step = 1e-4 * (time_diff_hours / 6.0)
     
+    # Pre-calculate masks or coordinate indices for each basin
+    basin_masks = {}
+    for name, b_def in BASINS.items():
+        lat_min, lat_max = b_def["lat_range"]
+        lat_idx = np.where((latitudes >= lat_min) & (latitudes <= lat_max))[0]
+        
+        if "lon_range" in b_def:
+            lon_min, lon_max = b_def["lon_range"]
+            lon_idx = np.where((longitudes >= lon_min) & (longitudes <= lon_max))[0]
+            basin_masks[name] = (lat_idx, lon_idx, None)
+        else:
+            lon_idx_list = []
+            for lon_min, lon_max in b_def["lon_ranges"]:
+                lon_idx_list.append(np.where((longitudes >= lon_min) & (longitudes <= lon_max))[0])
+            basin_masks[name] = (lat_idx, None, lon_idx_list)
+            
     for t in range(len(raw_times)):
-        # Spatial slice of winds for current timestep
-        us_t = us_full[t][np.ix_(lat_indices, lon_indices)]
-        vs_t = vs_full[t][np.ix_(lat_indices, lon_indices)]
+        us_t = us_full[t]
+        vs_t = vs_full[t]
         
-        # Calculate wind speed magnitude and convert to knots
-        ws_kt = np.sqrt(us_t**2 + vs_t**2) * MPS_TO_KNOTS
-        
-        # Sum squared values above threshold
-        active_winds = np.where(ws_kt >= TS_THRESHOLD_KNOTS, ws_kt, 0.0)
-        current_ts_ace_sum += np.sum(active_winds**2) * scale_step
-        
-        # Append cumulative value
-        cumulative_ace_time.append(current_ts_ace_sum)
-        
-    cumulative_ace_time = np.array(cumulative_ace_time)
+        for name, (lat_idx, lon_idx, lon_idx_list) in basin_masks.items():
+            if len(lat_idx) == 0:
+                step_ace = 0.0
+            elif lon_idx is not None:
+                if len(lon_idx) == 0:
+                    step_ace = 0.0
+                else:
+                    us_sub = us_t[np.ix_(lat_idx, lon_idx)]
+                    vs_sub = vs_t[np.ix_(lat_idx, lon_idx)]
+                    ws_kt = np.sqrt(us_sub**2 + vs_sub**2) * MPS_TO_KNOTS
+                    active_winds = np.where(ws_kt >= TS_THRESHOLD_KNOTS, ws_kt, 0.0)
+                    step_ace = np.sum(active_winds**2) * scale_step
+            else:
+                step_ace = 0.0
+                for l_idx in lon_idx_list:
+                    if len(l_idx) > 0:
+                        us_sub = us_t[np.ix_(lat_idx, l_idx)]
+                        vs_sub = vs_t[np.ix_(lat_idx, l_idx)]
+                        ws_kt = np.sqrt(us_sub**2 + vs_sub**2) * MPS_TO_KNOTS
+                        active_winds = np.where(ws_kt >= TS_THRESHOLD_KNOTS, ws_kt, 0.0)
+                        step_ace += np.sum(active_winds**2) * scale_step
+            
+            basin_totals[name] += step_ace
+            basin_cumulative_ace[name].append(basin_totals[name])
+            
+    # For backward compatibility, map cumulative_ace_time to North Atlantic
+    cumulative_ace_time = np.array(basin_cumulative_ace["North Atlantic"])
     
     # Parse datetimes for plotting
     epoch = datetime.strptime(time_units.split("since ")[1], "%Y-%m-%d %H:%M:%00" if "%H:%M:%00" in time_units else "%Y-%m-%d %H:%M:%S")
@@ -421,10 +527,19 @@ def process_ace_diagnostics(
         ace_spatial_var.long_name = "Local Accumulated Cyclone Energy spatial field"
         ace_spatial_var[:] = local_ace
         
+        # Backward compatible variable
         ace_time_var = cache_nc.createVariable("cumulative_ace", "f4", ("time",), zlib=True, complevel=4)
         ace_time_var.units = "10^4 kt^2"
-        ace_time_var.long_name = "Basin-wide Cumulative ACE over time"
+        ace_time_var.long_name = "Basin-wide Cumulative ACE over time (North Atlantic)"
         ace_time_var[:] = cumulative_ace_time
+        
+        # Write separate cumulative ACE for each basin
+        for name in BASINS:
+            safe_name = name.lower().replace(" ", "_")
+            b_var = cache_nc.createVariable(f"cumulative_ace_{safe_name}", "f4", ("time",), zlib=True, complevel=4)
+            b_var.units = "10^4 kt^2"
+            b_var.long_name = f"Cumulative ACE over time for {name} basin"
+            b_var[:] = np.array(basin_cumulative_ace[name])
         
         # Global attributes
         cache_nc.title = "Cached ACE Diagnostic Fields"
@@ -432,10 +547,10 @@ def process_ace_diagnostics(
         cache_nc.source_ensemble = ens
         cache_nc.source_collection = collection
         cache_nc.calculation_date = datetime.utcnow().isoformat() + "Z"
-        cache_nc.comment = "Generated by calculate_ace_diagnostics.py. Caches 2D maps and temporal curves."
+        cache_nc.comment = "Generated by calculate_ace_diagnostics.py. Caches 2D maps and temporal curves globally."
 
-    print(f"ACE Diagnostics processing & caching complete! (Total Basin ACE reached: {cumulative_ace_time[-1]:.2f})\n")
-    return local_ace, cumulative_ace_time, time_dates
+    print(f"ACE Diagnostics processing & caching complete! (Total Basin ACE reached: North Atlantic = {cumulative_ace_time[-1]:.2f})\n")
+    return local_ace, cumulative_ace_time, time_dates, basin_cumulative_ace
 
 
 # ==============================================================================
@@ -450,11 +565,13 @@ def plot_ace_diagnostics(
     init_date: str,
     ens: str,
     plot_dir: Path,
+    basin_cumulative_ace: dict | None = None,
 ) -> None:
     """Generate and save premium, publication-quality diagnostic plots.
 
     1. A spatial Mercator projection map showing local ACE centers and storm tracks.
     2. A temporal line chart showing accumulation curves during September–November.
+    3. A global Pacific-centered map showing all basins and their respective integrated ACE.
     """
     plot_dir.mkdir(parents=True, exist_ok=True)
     print("Generating diagnostic plots...")
@@ -466,7 +583,7 @@ def plot_ace_diagnostics(
     plt.rcParams["axes.linewidth"] = 0.8
 
     # --------------------------------------------------------------------------
-    # PLOT 1: SPATIAL ACE MAP
+    # PLOT 1: SPATIAL ACE MAP (NORTH ATLANTIC FOCUS)
     # --------------------------------------------------------------------------
     fig1 = plt.figure(figsize=(12, 7), dpi=300)
     
@@ -485,7 +602,6 @@ def plot_ace_diagnostics(
         ax.add_feature(cfeature.BORDERS, edgecolor="#4f5b66", linewidth=0.4, linestyle=":", zorder=2)
         
         # Plot spatial ACE contours
-        # Shift longitudes to match -180 to 180 if needed
         lons_shifted = (longitudes + 180) % 360 - 180
         sorted_idx = np.argsort(lons_shifted)
         lons_plot = lons_shifted[sorted_idx]
@@ -494,7 +610,6 @@ def plot_ace_diagnostics(
         # Levels for ACE (only plot active storm energy > 0)
         levels = np.linspace(0.1, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.1 else 10.0, 100)
         
-        # Premium magma colorbar mapping
         contour = ax.contourf(
             lons_plot, latitudes, ace_plot,
             levels=levels,
@@ -590,7 +705,126 @@ def plot_ace_diagnostics(
     temporal_plot_path = plot_dir / f"ace_accumulation_{init_date}_{ens}.png"
     plt.savefig(temporal_plot_path, bbox_inches="tight", dpi=300)
     plt.close()
-    print(f"  -> Saved accumulation curve to: {temporal_plot_path}\n")
+    print(f"  -> Saved accumulation curve to: {temporal_plot_path}")
+
+    # --------------------------------------------------------------------------
+    # PLOT 3: GLOBAL MULTI-BASIN ACE MAP
+    # --------------------------------------------------------------------------
+    fig3 = plt.figure(figsize=(14, 8), dpi=300)
+    
+    if HAS_CARTOPY:
+        # Pacific-centered Cylindrical Projection (central_longitude=180.0)
+        projection = ccrs.PlateCarree(central_longitude=180.0)
+        ax3 = fig3.add_subplot(1, 1, 1, projection=projection)
+        
+        ax3.set_global()
+        
+        # Add high-quality features (ocean, land, coastlines, borders)
+        ax3.add_feature(cfeature.OCEAN, facecolor="#11151c", zorder=0)  # Dark theme ocean
+        ax3.add_feature(cfeature.LAND, facecolor="#1e222a", zorder=1)   # Slate gray land
+        ax3.add_feature(cfeature.COASTLINE, edgecolor="#4f5b66", linewidth=0.5, zorder=2)
+        ax3.add_feature(cfeature.BORDERS, edgecolor="#4f5b66", linewidth=0.3, linestyle=":", zorder=2)
+        
+        # Plot spatial ACE contours globally
+        lons_shifted = (longitudes + 180) % 360 - 180
+        sorted_idx = np.argsort(lons_shifted)
+        lons_plot = lons_shifted[sorted_idx]
+        ace_plot = local_ace[:, sorted_idx]
+        
+        levels = np.linspace(0.1, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.1 else 10.0, 100)
+        
+        contour3 = ax3.contourf(
+            lons_plot, latitudes, ace_plot,
+            levels=levels,
+            transform=ccrs.PlateCarree(),
+            cmap="magma",
+            zorder=3,
+            alpha=0.85
+        )
+        
+        # Add grid lines
+        gl3 = ax3.gridlines(draw_labels=True, linewidth=0.2, color="#4f5b66", alpha=0.4, linestyle="--")
+        gl3.top_labels = False
+        gl3.right_labels = False
+        gl3.xlabel_style = {"size": 8, "color": "#777777"}
+        gl3.ylabel_style = {"size": 8, "color": "#777777"}
+        
+    else:
+        # Standard axes fallback
+        ax3 = fig3.add_subplot(1, 1, 1)
+        ax3.set_facecolor("#11151c")
+        levels = np.linspace(0.1, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.1 else 10.0, 100)
+        contour3 = ax3.contourf(longitudes, latitudes, local_ace, levels=levels, cmap="magma")
+        ax3.set_xlim([-180.0, 180.0])
+        ax3.set_ylim([-60.0, 60.0])
+        ax3.set_xlabel("Longitude")
+        ax3.set_ylabel("Latitude")
+        ax3.grid(True, linewidth=0.2, color="#4f5b66", alpha=0.4, linestyle="--")
+
+    # Draw basin boundary rectangles and labels
+    for name, b_def in BASINS.items():
+        color = b_def["color"]
+        lat_min, lat_max = b_def["lat_range"]
+        
+        # Get total ACE for this basin (use final timestep)
+        total_ace = 0.0
+        if basin_cumulative_ace and name in basin_cumulative_ace:
+            total_ace = basin_cumulative_ace[name][-1]
+            
+        # Draw rectangular boundaries
+        if "lon_range" in b_def:
+            lon_min, lon_max = b_def["lon_range"]
+            lons_rect = [lon_min, lon_max, lon_max, lon_min, lon_min]
+            lats_rect = [lat_min, lat_min, lat_max, lat_max, lat_min]
+            if HAS_CARTOPY:
+                ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.5, linestyle="--", transform=ccrs.PlateCarree(), zorder=4)
+            else:
+                ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.5, linestyle="--", zorder=4)
+        else:
+            # Split-meridian case (South Pacific)
+            for lon_min, lon_max in b_def["lon_ranges"]:
+                lons_rect = [lon_min, lon_max, lon_max, lon_min, lon_min]
+                lats_rect = [lat_min, lat_min, lat_max, lat_max, lat_min]
+                if HAS_CARTOPY:
+                    ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.5, linestyle="--", transform=ccrs.PlateCarree(), zorder=4)
+                else:
+                    ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.5, linestyle="--", zorder=4)
+                    
+        # Place label inside or near the box
+        label_lon, label_lat = b_def["label_xy"]
+        bbox_props = dict(boxstyle="round,pad=0.3", fc="#11151c", ec=color, lw=1.2, alpha=0.85)
+        
+        if HAS_CARTOPY:
+            ax3.text(
+                label_lon, label_lat, f"{name}\nACE: {total_ace:.2f}",
+                transform=ccrs.PlateCarree(),
+                color="#ffffff", fontsize=8, fontweight="bold",
+                ha="center", va="center", bbox=bbox_props, zorder=5
+            )
+        else:
+            ax3.text(
+                label_lon, label_lat, f"{name}\nACE: {total_ace:.2f}",
+                color="#ffffff", fontsize=8, fontweight="bold",
+                ha="center", va="center", bbox=bbox_props, zorder=5
+            )
+
+    # Add global colorbar
+    cbar3 = fig3.colorbar(contour3, ax=ax3, orientation="horizontal", pad=0.08, aspect=45, shrink=0.75)
+    cbar3.set_label("Accumulated Cyclone Energy Index (10$^4$ kt$^2$)", fontsize=9, color="#333333", fontweight="bold", labelpad=6)
+    cbar3.ax.tick_params(labelsize=8, color="#555555", labelcolor="#333333")
+    cbar3.outline.set_visible(False)
+    
+    # Custom title
+    plt.title(
+        f"GEOS S2S3 Global Multi-Basin Accumulated Cyclone Energy (ACE) Map\n"
+        f"Initialization: {init_date}  |  Ensemble: {ens}  |  Season: Sep-Nov",
+        fontsize=13, fontweight="bold", pad=15, color="#1e222a"
+    )
+    
+    global_plot_path = plot_dir / f"global_ace_map_{init_date}_{ens}.png"
+    plt.savefig(global_plot_path, bbox_inches="tight", dpi=300)
+    plt.close()
+    print(f"  -> Saved global multi-basin map to: {global_plot_path}\n")
 
 
 # ==============================================================================
@@ -668,7 +902,7 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 80)
     
     # Run the diagnostics pipeline
-    local_ace, cumulative_ace_time, time_dates = process_ace_diagnostics(
+    local_ace, cumulative_ace_time, time_dates, basin_cumulative_ace = process_ace_diagnostics(
         sfc_root=sfc_root,
         init_date=init_date,
         ens=args.ens,
@@ -694,6 +928,7 @@ def main(argv: list[str] | None = None) -> int:
         init_date=init_date,
         ens=args.ens,
         plot_dir=plot_dir,
+        basin_cumulative_ace=basin_cumulative_ace,
     )
     
     print("=" * 80)
