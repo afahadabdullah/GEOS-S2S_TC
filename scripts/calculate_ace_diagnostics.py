@@ -436,7 +436,35 @@ def process_ace_diagnostics(
     # 3. Calculate 2D Local Spatial ACE
     print("  Calculating Local ACE map...")
     local_ace = calculate_local_ace(us_full, vs_full, sampling_hours=time_diff_hours)
-    
+
+    # 3b. Apply spatial basin mask: zero out ACE at every grid point that falls
+    #     outside ALL defined tropical cyclone basin bounding boxes.
+    #     Without this, mid/high-latitude westerlies and Southern Ocean storm tracks
+    #     accumulate massive false ACE values over the 90-day season.
+    print("  Applying spatial basin mask to local ACE (restricting to TC basin regions)...")
+    nlat_g = len(latitudes)
+    nlon_g = len(longitudes)
+    basin_mask_2d = np.zeros((nlat_g, nlon_g), dtype=bool)
+
+    for b_def in BASINS.values():
+        lat_min, lat_max = b_def["lat_range"]
+        lat_mask = (latitudes >= lat_min) & (latitudes <= lat_max)  # shape (nlat,)
+
+        if "lon_range" in b_def:
+            lon_min, lon_max = b_def["lon_range"]
+            lon_mask = (longitudes >= lon_min) & (longitudes <= lon_max)  # shape (nlon,)
+            # Outer product → 2D (nlat, nlon) coverage mask for this basin
+            basin_mask_2d |= np.outer(lat_mask, lon_mask)
+        else:
+            # Split-meridian basin (e.g. South Pacific crosses the date line)
+            for lon_min, lon_max in b_def["lon_ranges"]:
+                lon_mask = (longitudes >= lon_min) & (longitudes <= lon_max)
+                basin_mask_2d |= np.outer(lat_mask, lon_mask)
+
+    # Zero out every grid point that is not inside any TC basin
+    local_ace[~basin_mask_2d] = 0.0
+    print(f"  Basin mask applied: {basin_mask_2d.sum()} / {nlat_g * nlon_g} grid points retained.")
+
     # 4. Calculate Time Series of Cumulative ACE for All Basins
     print("  Calculating temporal cumulative ACE for all global basins...")
     basin_cumulative_ace = {name: [] for name in BASINS}
