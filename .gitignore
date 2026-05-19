@@ -10,3 +10,7 @@ __pycache__/
 
 # OS specific files
 .DS_Store
+
+# Generated plots
+plots/
+
