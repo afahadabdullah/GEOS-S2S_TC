@@ -48,10 +48,10 @@ TS_THRESHOLD_KNOTS = 34.0  # Tropical Storm threshold (34 knots / 17.5 m/s)
 # Standard Global Tropical Cyclone Basin Boundaries
 BASINS = {
     "North Atlantic": {
-        "lat_range": (0.0, 60.0),
+        "lat_range": (0.0, 45.0),
         "lon_range": (-100.0, -10.0),
         "color": "#e55934",
-        "label_xy": (-45.0, 48.0)
+        "label_xy": (-55.0, 38.0)
     },
     "Northeast Pacific": {
         "lat_range": (0.0, 40.0),
@@ -60,10 +60,10 @@ BASINS = {
         "label_xy": (-135.0, 32.0)
     },
     "Northwest Pacific": {
-        "lat_range": (0.0, 60.0),
+        "lat_range": (0.0, 45.0),
         "lon_range": (100.0, 180.0),
         "color": "#2ec4b6",
-        "label_xy": (138.0, 48.0)
+        "label_xy": (140.0, 38.0)
     },
     "North Indian": {
         "lat_range": (0.0, 40.0),
@@ -492,27 +492,30 @@ def process_ace_diagnostics(
         vs_t = vs_full[t]
         
         for name, (lat_idx, lon_idx, lon_idx_list) in basin_masks.items():
+            # Traditional ACE proxy: use the MAXIMUM wind speed at any single
+            # grid point in the basin at this timestep.  This approximates the
+            # classic Vmax-based ACE (one value per storm per synoptic time)
+            # and avoids the inflated totals from summing V**2 across thousands
+            # of grid points.
+            max_ws_kt = 0.0
             if len(lat_idx) == 0:
-                step_ace = 0.0
+                pass
             elif lon_idx is not None:
-                if len(lon_idx) == 0:
-                    step_ace = 0.0
-                else:
+                if len(lon_idx) > 0:
                     us_sub = us_t[np.ix_(lat_idx, lon_idx)]
                     vs_sub = vs_t[np.ix_(lat_idx, lon_idx)]
                     ws_kt = np.sqrt(us_sub**2 + vs_sub**2) * MPS_TO_KNOTS
-                    active_winds = np.where(ws_kt >= TS_THRESHOLD_KNOTS, ws_kt, 0.0)
-                    step_ace = np.sum(active_winds**2) * scale_step
+                    max_ws_kt = float(np.max(ws_kt))
             else:
-                step_ace = 0.0
                 for l_idx in lon_idx_list:
                     if len(l_idx) > 0:
                         us_sub = us_t[np.ix_(lat_idx, l_idx)]
                         vs_sub = vs_t[np.ix_(lat_idx, l_idx)]
                         ws_kt = np.sqrt(us_sub**2 + vs_sub**2) * MPS_TO_KNOTS
-                        active_winds = np.where(ws_kt >= TS_THRESHOLD_KNOTS, ws_kt, 0.0)
-                        step_ace += np.sum(active_winds**2) * scale_step
+                        max_ws_kt = max(max_ws_kt, float(np.max(ws_kt)))
             
+            # Only accumulate when the basin peak wind exceeds TS threshold
+            step_ace = (max_ws_kt**2 * scale_step) if max_ws_kt >= TS_THRESHOLD_KNOTS else 0.0
             basin_totals[name] += step_ace
             basin_cumulative_ace[name].append(basin_totals[name])
             
