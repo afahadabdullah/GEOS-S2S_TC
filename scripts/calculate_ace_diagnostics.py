@@ -318,10 +318,32 @@ def process_ace_diagnostics(
     us_full = np.concatenate(all_us, axis=0)
     vs_full = np.concatenate(all_vs, axis=0)
     
-    # Determine actual sampling hours between time steps
-    time_diff_hours = 6  # standard fallback
+    # Determine actual sampling hours between time steps robustly
+    time_diff_hours = 6.0  # standard fallback
     if len(raw_times) > 1:
-        time_diff_hours = int(raw_times[1] - raw_times[0])
+        try:
+            # Attempt to decode using netCDF4's standard num2date
+            dates = netCDF4.num2date(raw_times[:2], units=time_units)
+            dt_seconds = (dates[1] - dates[0]).total_seconds()
+            time_diff_hours = float(dt_seconds / 3600.0)
+        except Exception as e:
+            # Fallback heuristic using the time units string
+            diff_val = float(raw_times[1] - raw_times[0])
+            units_lower = time_units.lower() if time_units else ""
+            if "day" in units_lower:
+                time_diff_hours = diff_val * 24.0
+            elif "hour" in units_lower:
+                time_diff_hours = diff_val
+            elif "min" in units_lower:
+                time_diff_hours = diff_val / 60.0
+            elif "sec" in units_lower:
+                time_diff_hours = diff_val / 3600.0
+            else:
+                time_diff_hours = diff_val
+
+    # Ensure we don't have 0 or negative sampling hours
+    if time_diff_hours <= 0:
+        time_diff_hours = 6.0
         
     print(f"Dataset summary:")
     print(f"  Shape: {us_full.shape} (time, lat, lon)")
