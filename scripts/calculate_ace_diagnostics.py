@@ -577,7 +577,7 @@ def plot_ace_diagnostics(
     print("Generating diagnostic plots...")
 
     # Set up styling parameters for premium aesthetics
-    plt.rcParams["font.sans-serif"] = "Arial"
+    plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Helvetica", "Arial", "sans-serif"]
     plt.rcParams["font.family"] = "sans-serif"
     plt.rcParams["axes.edgecolor"] = "#cccccc"
     plt.rcParams["axes.linewidth"] = 0.8
