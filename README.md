@@ -200,6 +200,16 @@ Notes:
 - it accumulates ACE only when the basin candidate has a local SLP minimum, a
   positive warm-core anomaly, a positive low-level moisture anomaly, and, when
   U/V are available, hemisphere-consistent 850-hPa vorticity
+- it writes a cache file under `data/cache/` by default and saves plots under
+  `plots/` by default
+- plots can be regenerated from an existing cache without re-reading SFC or ATM
+  files:
+
+```bash
+python scripts/calculate_tc_conditioned_ace.py \
+  --init-date 20200824 \
+  --plot-only-cache data/cache/tc_conditioned_ace_20200824_ens1.nc4
+```
 
 ## How the Jobs Work
 
