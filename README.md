@@ -12,6 +12,12 @@ Current focus:
 
 This repo is being used to support later tropical cyclone diagnostics such as GPI and ACE for GEOS S2Sv2 vs S2Sv3 comparisons.
 
+There is also an experimental ATM-informed ACE proxy at
+[scripts/calculate_tc_conditioned_ace.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/calculate_tc_conditioned_ace.py).
+It uses SFC winds for the ACE intensity term, but gates accumulation with ATM
+structure from SLP, T, QV, and optional 850-hPa vorticity instead of relying on
+a single model-specific wind threshold.
+
 ## Repository Layout
 
 ```text
@@ -171,6 +177,29 @@ Defaults:
 - collection: `atm_inst_6hr_glo_L720x361_p49`
 - init dates: `1991-2024`, late August
 - forecast months: `09 10 11`
+
+### 8. Experimental TC-conditioned ACE from SFC + ATM
+
+Script:
+- [scripts/calculate_tc_conditioned_ace.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/calculate_tc_conditioned_ace.py)
+
+Example:
+
+```bash
+python scripts/calculate_tc_conditioned_ace.py \
+  --sfc-root /nobackupp27/afahad/project/GEOS-S2S_TC/data \
+  --atm-root /nobackupp17/afahad/GEOSS2S3_atm \
+  --init-date 20200824 \
+  --ens ens1 \
+  --months 09,10,11
+```
+
+Notes:
+- it processes only ATM files that are actually present under the requested init/ens
+- it matches each ATM valid time to the nearest SFC valid time within tolerance
+- it accumulates ACE only when the basin candidate has a local SLP minimum, a
+  positive warm-core anomaly, a positive low-level moisture anomaly, and, when
+  U/V are available, hemisphere-consistent 850-hPa vorticity
 
 ## How the Jobs Work
 
