@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
-"""Calculate TC-conditioned ACE from GEOS S2S3 SFC winds and ATM structure.
+"""Calculate TC-conditioned 2D Spatial and Temporal ACE from GEOS S2S3 winds and ATM structure.
 
-This script is an experimental alternative to the fixed wind-threshold ACE
-workflow in ``calculate_ace_diagnostics.py``.
-
-Instead of accumulating ACE whenever a basin contains winds above one chosen
-threshold, this script uses a simple multivariate structural gate:
-
-1. Find the sea-level-pressure minimum in each tropical cyclone basin.
-2. Test whether the candidate center looks tropical-cyclone-like using:
-   - negative local SLP anomaly
-   - positive warm-core anomaly from T(850/500/200 hPa)
-   - positive low-level moisture anomaly from QV(850 hPa)
-   - hemisphere-consistent 850-hPa vorticity sign when U/V are available
-3. If the structure is TC-like, accumulate ACE using the maximum nearby surface
-   wind from the SFC files at the matching valid time.
-
-The goal is not to be a full tracker. It is a basin-level ACE proxy with a
-more physical storm gate than a single model-specific wind cutoff.
+This script is a unified master pipeline that:
+1. Loads SFC surface winds and ATM structure variables (SLP, T, QV, U, V).
+2. Performs robust longitude coordinate standardization ([0, 360] -> [-180, 180]).
+3. Evaluates low-pressure candidate centers in each basin using a multivariate vertical structure gate:
+   - Negative local SLP anomaly (isolated via an environmental annulus)
+   - Positive warm-core anomaly from T(850/500/200 hPa)
+   - Positive low-level moisture anomaly from QV(850 hPa)
+   - Hemisphere-consistent 850-hPa relative vorticity sign (optional)
+4. If a TC is structurally approved at a given time step:
+   - Grid-point surface winds within a storm search radius (e.g. 3 degrees) of the center are
+     accumulated into a 2D spatial local ACE field.
+   - The maximum surface wind (vmax_kt) in the storm area is used to accumulate basin-wide
+     cumulative ACE curves over time.
+5. Caches calculations to a netCDF4 file.
+6. Generates three publication-quality diagnostic plots (focused spatial map, cumulative curves,
+   and global Pacific-centered multi-basin spatial map) using the clean TC-conditioned spatial ACE.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -61,43 +60,55 @@ DEFAULT_PLOT_DIR = "plots"
 
 MPS_TO_KNOTS = 1.94384
 EARTH_RADIUS_M = 6_371_000.0
+TS_THRESHOLD_KNOTS_DEFAULT = 17.0
 
+# Variable candidates for ATM structure gating
 SLP_CANDIDATES = ("SLP", "slp", "PSL", "SeaLevelPressure")
 T_CANDIDATES = ("T", "t", "TMP")
 QV_CANDIDATES = ("QV", "qv", "Q", "QVAPOR")
 U_CANDIDATES = ("U", "u", "UGRD")
 V_CANDIDATES = ("V", "v", "VGRD")
 
+# Variable candidates for SFC surface winds
+US_CANDIDATES = ("US", "us", "U10M", "u10")
+VS_CANDIDATES = ("VS", "vs", "V10M", "v10")
+
 BASINS = {
     "North Atlantic": {
         "lat_range": (0.0, 45.0),
         "lon_range": (-100.0, -10.0),
         "color": "#e55934",
+        "label_xy": (-55.0, 38.0)
     },
     "Northeast Pacific": {
         "lat_range": (0.0, 40.0),
         "lon_range": (-180.0, -100.0),
         "color": "#f3a712",
+        "label_xy": (-135.0, 32.0)
     },
     "Northwest Pacific": {
         "lat_range": (0.0, 45.0),
         "lon_range": (100.0, 180.0),
         "color": "#2ec4b6",
+        "label_xy": (140.0, 38.0)
     },
     "North Indian": {
         "lat_range": (0.0, 40.0),
         "lon_range": (40.0, 100.0),
         "color": "#9b5de5",
+        "label_xy": (70.0, 32.0)
     },
     "South Indian": {
         "lat_range": (-40.0, 0.0),
         "lon_range": (20.0, 135.0),
         "color": "#00bbf9",
+        "label_xy": (80.0, -32.0)
     },
     "South Pacific": {
         "lat_range": (-40.0, 0.0),
         "lon_ranges": [(135.0, 180.0), (-180.0, -120.0)],
         "color": "#ff007f",
+        "label_xy": (-155.0, -32.0)
     },
 }
 
@@ -284,13 +295,15 @@ def max_near_center(field: np.ndarray, lat_idx: int, lon_idx: int, lat_radius: i
 
 
 def basin_lon_sets(longitudes: np.ndarray, basin_def: dict[str, object]) -> list[np.ndarray]:
+    # Standardize longitudes to [-180, 180] range dynamically
+    lons_shifted = (longitudes + 180) % 360 - 180
     if "lon_range" in basin_def:
         lon_min, lon_max = basin_def["lon_range"]
-        return [np.where((longitudes >= lon_min) & (longitudes <= lon_max))[0]]
+        return [np.where((lons_shifted >= lon_min) & (lons_shifted <= lon_max))[0]]
 
     lon_sets: list[np.ndarray] = []
     for lon_min, lon_max in basin_def["lon_ranges"]:
-        lon_sets.append(np.where((longitudes >= lon_min) & (longitudes <= lon_max))[0])
+        lon_sets.append(np.where((lons_shifted >= lon_min) & (lons_shifted <= lon_max))[0])
     return lon_sets
 
 
@@ -398,8 +411,10 @@ class SFCIndex:
             self._cached_ds = netCDF4.Dataset(match.file_path, "r")
             self._cached_path = match.file_path
 
-        us = np.asarray(self._cached_ds.variables["US"][match.time_index, :, :], dtype="float64")
-        vs = np.asarray(self._cached_ds.variables["VS"][match.time_index, :, :], dtype="float64")
+        u_var_name = find_first_variable(self._cached_ds, US_CANDIDATES) or "US"
+        v_var_name = find_first_variable(self._cached_ds, VS_CANDIDATES) or "VS"
+        us = np.asarray(self._cached_ds.variables[u_var_name][match.time_index, :, :], dtype="float64")
+        vs = np.asarray(self._cached_ds.variables[v_var_name][match.time_index, :, :], dtype="float64")
         return us, vs
 
 
@@ -419,11 +434,65 @@ def basin_has_coverage(latitudes: np.ndarray, longitudes: np.ndarray, basin_def:
     return False
 
 
+def accumulate_storm_ace(
+    local_ace: np.ndarray,
+    sfc_ws_kt: np.ndarray,
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+    center_lat_idx: int,
+    center_lon_idx: int,
+    lat_radius: int,
+    lon_radius: int,
+    search_radius_deg: float,
+    ts_threshold_knots: float,
+    scale_step: float,
+) -> float:
+    """Accumulate grid-point surface winds squared into local_ace near active storm center."""
+    nlat, nlon = local_ace.shape
+
+    # Focus loop inside the patch bounding box for high performance
+    patch_indices_lat = np.arange(
+        max(0, center_lat_idx - lat_radius),
+        min(nlat, center_lat_idx + lat_radius + 1)
+    )
+    lon_offsets = np.arange(-lon_radius, lon_radius + 1)
+    patch_indices_lon = (center_lon_idx + lon_offsets) % nlon
+
+    center_lat_val = float(latitudes[center_lat_idx])
+    center_lon_val = float((longitudes[center_lon_idx] + 180) % 360 - 180)
+    lons_shifted = (longitudes + 180) % 360 - 180
+
+    max_ws_kt = 0.0
+    for lat_i in patch_indices_lat:
+        lat_val = float(latitudes[lat_i])
+        d_lat = lat_val - center_lat_val
+
+        for lon_j in patch_indices_lon:
+            lon_val = float(lons_shifted[lon_j])
+            d_lon = (lon_val - center_lon_val + 180) % 360 - 180
+            dist_deg = math.sqrt(d_lat**2 + d_lon**2)
+
+            if dist_deg <= search_radius_deg:
+                ws_kt = float(sfc_ws_kt[lat_i, lon_j])
+                if ws_kt > max_ws_kt:
+                    max_ws_kt = ws_kt
+
+                # Accumulate spatial grid ACE if wind speed exceeds adjustments
+                if ws_kt >= ts_threshold_knots:
+                    grid_step_ace = (ws_kt**2) * scale_step
+                    local_ace[lat_i, lon_j] += grid_step_ace
+
+    return max_ws_kt
+
+
 def write_cache(
     output_path: Path,
     init_date: str,
     ens: str,
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
     valid_times: list[datetime],
+    local_ace: np.ndarray,
     diagnostics: dict[str, dict[str, list[float]]],
     uses_vorticity: bool,
 ) -> None:
@@ -432,13 +501,39 @@ def write_cache(
     time_hours = np.array([(value - init_dt).total_seconds() / 3600.0 for value in valid_times], dtype="float32")
 
     with netCDF4.Dataset(output_path, "w", format="NETCDF4") as ds:
+        # Create dimensions
+        ds.createDimension("lat", len(latitudes))
+        ds.createDimension("lon", len(longitudes))
         ds.createDimension("time", len(valid_times))
 
+        # Create coordinate variables
+        lat_var = ds.createVariable("lat", "f4", ("lat",))
+        lon_var = ds.createVariable("lon", "f4", ("lon",))
         time_var = ds.createVariable("time", "f4", ("time",))
-        time_var.units = f"hours since {init_dt.strftime('%Y-%m-%d %H:%M:%S')}"
-        time_var.long_name = "valid time"
+
+        # Write coordinates
+        lat_var[:] = latitudes
+        lon_var[:] = longitudes
         time_var[:] = time_hours
 
+        lat_var.units = "degrees_north"
+        lon_var.units = "degrees_east"
+        time_var.units = f"hours since {init_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+        time_var.long_name = "valid time"
+
+        # Create compressed spatial local ACE field
+        ace_spatial_var = ds.createVariable("local_ace", "f4", ("lat", "lon"), zlib=True, complevel=4)
+        ace_spatial_var.units = "10^4 kt^2"
+        ace_spatial_var.long_name = "Local Accumulated Cyclone Energy spatial field"
+        ace_spatial_var[:] = local_ace
+
+        # Backward compatible integrated curves variable (North Atlantic)
+        ace_time_var = ds.createVariable("cumulative_ace", "f4", ("time",), zlib=True, complevel=4)
+        ace_time_var.units = "10^4 kt^2"
+        ace_time_var.long_name = "Basin-wide Cumulative ACE over time (North Atlantic)"
+        ace_time_var[:] = np.array(diagnostics["North Atlantic"]["cumulative_ace"], dtype="float32")
+
+        # Save all other multi-basin curves
         for basin_name, basin_data in diagnostics.items():
             basin_key = safe_name(basin_name)
             for field_name, values in basin_data.items():
@@ -474,19 +569,25 @@ def write_cache(
         ds.source_ensemble = ens
         ds.uses_vorticity = "true" if uses_vorticity else "false"
         ds.comment = (
-            "Experimental ACE proxy using SFC wind intensity gated by ATM structure: "
+            "Unified ACE proxy using SFC wind intensity gated by ATM structure: "
             "SLP minimum, warm-core anomaly, low-level moisture anomaly, and optional 850-hPa vorticity sign."
         )
 
 
-def read_cache(cache_path: Path) -> tuple[str, str, list[datetime], dict[str, dict[str, np.ndarray]], bool]:
+def read_cache(cache_path: Path) -> tuple[str, str, np.ndarray, np.ndarray, list[datetime], np.ndarray, dict[str, dict[str, np.ndarray]], bool]:
     diagnostics: dict[str, dict[str, np.ndarray]] = {}
     with netCDF4.Dataset(cache_path, "r") as ds:
         init_date = str(getattr(ds, "source_initialization"))
         ens = str(getattr(ds, "source_ensemble"))
         uses_vorticity = str(getattr(ds, "uses_vorticity", "false")).lower() == "true"
+        
+        latitudes = np.asarray(ds.variables["lat"][:], dtype="float64")
+        longitudes = np.asarray(ds.variables["lon"][:], dtype="float64")
+        
         time_var = ds.variables["time"]
         times = [to_datetime(value) for value in netCDF4.num2date(time_var[:], time_var.units)]
+        
+        local_ace = np.asarray(ds.variables["local_ace"][:], dtype="float64")
 
         for basin_name in BASINS:
             basin_key = safe_name(basin_name)
@@ -507,173 +608,242 @@ def read_cache(cache_path: Path) -> tuple[str, str, list[datetime], dict[str, di
                 var_name = f"{field_name}_{basin_key}"
                 diagnostics[basin_name][field_name] = np.asarray(ds.variables[var_name][:])
 
-    return init_date, ens, times, diagnostics, uses_vorticity
+    return init_date, ens, latitudes, longitudes, times, local_ace, diagnostics, uses_vorticity
 
 
-def plot_tc_conditioned_ace_from_cache(cache_path: Path, plot_dir: Path) -> None:
-    init_date, ens, times, diagnostics, uses_vorticity = read_cache(cache_path)
+def plot_ace_diagnostics(
+    local_ace: np.ndarray,
+    cumulative_ace_time: np.ndarray,
+    time_dates: list[datetime],
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+    init_date: str,
+    ens: str,
+    plot_dir: Path,
+    basin_cumulative_ace: dict[str, np.ndarray] | None = None,
+) -> None:
+    """Generate and save premium, publication-quality diagnostic plots.
+
+    1. A spatial Mercator projection map showing local TC-conditioned ACE tracks (NATL).
+    2. A temporal line chart showing accumulation curves.
+    3. A global Pacific-centered map showing all basins and integrated ACE.
+    """
     plot_dir.mkdir(parents=True, exist_ok=True)
+    print("Generating unified diagnostic plots...")
 
     plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Helvetica", "Arial", "sans-serif"]
     plt.rcParams["font.family"] = "sans-serif"
     plt.rcParams["axes.edgecolor"] = "#cccccc"
     plt.rcParams["axes.linewidth"] = 0.8
 
-    print(f"Generating plots from cache: {cache_path}")
+    from matplotlib.colors import LinearSegmentedColormap
+    colors = ["#4d924d", "#95d5b2", "#ffeb3b", "#ffa726", "#e65100", "#c2185b", "#ffffff"]
+    ace_cmap = LinearSegmentedColormap.from_list("wmo_ace", colors, N=256)
 
-    # ------------------------------------------------------------------
-    # Plot 1: Multi-basin cumulative TC-conditioned ACE
-    # ------------------------------------------------------------------
-    fig1, ax1 = plt.subplots(figsize=(11, 6), dpi=300)
-    for basin_name, basin_def in BASINS.items():
-        curve = diagnostics[basin_name]["cumulative_ace"]
-        ax1.plot(times, curve, linewidth=2.2, color=basin_def["color"], label=basin_name)
+    # Standardize longitudes to [-180, 180] for maps plotting
+    lons_shifted = (longitudes + 180) % 360 - 180
+    sorted_idx = np.argsort(lons_shifted)
+    lons_plot = lons_shifted[sorted_idx]
+    ace_plot = local_ace[:, sorted_idx]
 
-    ax1.set_facecolor("#fafafa")
-    fig1.patch.set_facecolor("#ffffff")
-    ax1.spines["top"].set_visible(False)
-    ax1.spines["right"].set_visible(False)
-    ax1.grid(True, linestyle="--", alpha=0.35, color="#cccccc", linewidth=0.5)
-    ax1.tick_params(axis="both", labelsize=9, colors="#555555")
-    ax1.set_ylabel("Cumulative TC-Conditioned ACE (10$^4$ kt$^2$)", fontsize=10, fontweight="bold")
-    ax1.set_xlabel("Forecast Lead Time (Date)", fontsize=10, fontweight="bold")
-    ax1.set_title(
-        f"GEOS S2S3 TC-Conditioned ACE by Basin\nInitialization: {init_date}  |  Ensemble: {ens}",
-        fontsize=12,
-        fontweight="bold",
-        pad=12,
-        color="#1e222a",
-    )
-    ax1.legend(frameon=False, fontsize=8, ncol=2, loc="upper left")
-    fig1.autofmt_xdate()
-    curve_plot_path = plot_dir / f"tc_conditioned_ace_curves_{init_date}_{ens}.png"
-    plt.savefig(curve_plot_path, bbox_inches="tight", dpi=300)
-    plt.close(fig1)
-    print(f"  -> Saved basin ACE curves to: {curve_plot_path}")
-
-    # ------------------------------------------------------------------
-    # Plot 2: Global map of accepted candidate centers
-    # ------------------------------------------------------------------
-    fig2 = plt.figure(figsize=(14, 8), dpi=300)
+    # --------------------------------------------------------------------------
+    # PLOT 1: SPATIAL TC-CONDITIONED ACE MAP (NORTH ATLANTIC FOCUS)
+    # --------------------------------------------------------------------------
+    fig1 = plt.figure(figsize=(12, 7), dpi=300)
+    
     if HAS_CARTOPY:
-        ax2 = fig2.add_subplot(1, 1, 1, projection=ccrs.PlateCarree(central_longitude=180.0))
-        ax2.set_global()
-        ax2.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)
-        ax2.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=1)
-        ax2.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.5, zorder=2)
-        ax2.add_feature(cfeature.BORDERS, edgecolor="#bbbbbb", linewidth=0.3, linestyle=":", zorder=2)
-        gl = ax2.gridlines(draw_labels=True, linewidth=0.2, color="#aaaaaa", alpha=0.4, linestyle="--", zorder=3)
+        projection = ccrs.Mercator(central_longitude=-55.0, min_latitude=0.0, max_latitude=45.0)
+        ax = fig1.add_subplot(1, 1, 1, projection=projection)
+        ax.set_extent([-98.0, -15.0, 5.0, 42.0], crs=ccrs.PlateCarree())
+        
+        ax.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)
+        
+        levels = np.linspace(0.005, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.005 else 5.0, 100)
+        contour = ax.contourf(
+            lons_plot, latitudes, ace_plot,
+            levels=levels,
+            transform=ccrs.PlateCarree(),
+            cmap=ace_cmap,
+            zorder=1,
+            alpha=0.9
+        )
+        
+        ax.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=2)
+        ax.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.6, zorder=3)
+        ax.add_feature(cfeature.BORDERS, edgecolor="#bbbbbb", linewidth=0.4, linestyle=":", zorder=3)
+        
+        gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--", zorder=4)
         gl.top_labels = False
         gl.right_labels = False
         gl.xlabel_style = {"size": 8, "color": "#555555"}
         gl.ylabel_style = {"size": 8, "color": "#555555"}
     else:
-        ax2 = fig2.add_subplot(1, 1, 1)
-        ax2.set_facecolor("#daeefb")
-        ax2.set_xlim([-180.0, 180.0])
-        ax2.set_ylim([-45.0, 50.0])
-        ax2.set_xlabel("Longitude")
-        ax2.set_ylabel("Latitude")
-        ax2.grid(True, linewidth=0.2, color="#aaaaaa", alpha=0.4, linestyle="--")
+        ax = fig1.add_subplot(1, 1, 1)
+        ax.set_facecolor("#daeefb")
+        levels = np.linspace(0.005, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.005 else 5.0, 100)
+        contour = ax.contourf(longitudes, latitudes, local_ace, levels=levels, cmap=ace_cmap)
+        ax.set_xlim([-98.0, -15.0])
+        ax.set_ylim([5.0, 42.0])
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
+        ax.grid(True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--")
 
-    for basin_name, basin_def in BASINS.items():
-        basin_diag = diagnostics[basin_name]
-        accepted = (basin_diag["tc_flag"] > 0) & np.isfinite(basin_diag["center_lat"]) & np.isfinite(basin_diag["center_lon"])
-        if not np.any(accepted):
-            continue
+    cbar = fig1.colorbar(contour, ax=ax, orientation="horizontal", pad=0.08, aspect=40, shrink=0.8)
+    cbar.set_label("TC-Conditioned Spatial ACE Index (10$^4$ kt$^2$)", fontsize=9, color="#333333", fontweight="bold", labelpad=6)
+    cbar.ax.tick_params(labelsize=8, color="#555555", labelcolor="#333333")
+    cbar.outline.set_visible(False)
+    
+    plt.title(
+        f"GEOS S2S3 TC-Conditioned Local Accumulated Cyclone Energy (ACE) Map\n"
+        f"Initialization: {init_date}  |  Member: {ens}  |  Season: Sep-Nov",
+        fontsize=12, fontweight="bold", pad=15, color="#1e222a"
+    )
+    
+    spatial_plot_path = plot_dir / f"local_ace_map_{init_date}_{ens}.png"
+    plt.savefig(spatial_plot_path, bbox_inches="tight", dpi=300)
+    plt.close()
+    print(f"  -> Saved spatial map to: {spatial_plot_path}")
 
-        lats = basin_diag["center_lat"][accepted]
-        lons = basin_diag["center_lon"][accepted]
-        sizes = 25.0 + 120.0 * np.sqrt(np.maximum(basin_diag["step_ace"][accepted], 0.0))
-        color = basin_def["color"]
+    # --------------------------------------------------------------------------
+    # PLOT 2: TEMPORAL CUMULATIVE ACE
+    # --------------------------------------------------------------------------
+    fig2, ax2 = plt.subplots(figsize=(10, 5), dpi=300)
+    ax2.plot(time_dates, cumulative_ace_time, color="#e55934", linewidth=2.5, label="Cumulative ACE")
+    ax2.fill_between(time_dates, cumulative_ace_time, color="#e55934", alpha=0.1)
+    
+    ax2.set_facecolor("#fafafa")
+    fig2.patch.set_facecolor("#ffffff")
+    ax2.spines["top"].set_visible(False)
+    ax2.spines["right"].set_visible(False)
+    ax2.spines["left"].set_color("#cccccc")
+    ax2.spines["bottom"].set_color("#cccccc")
+    
+    ax2.set_ylabel("Basin-wide Cumulative ACE (10$^4$ kt$^2$)", fontsize=10, fontweight="bold", labelpad=8)
+    ax2.set_xlabel("Forecast Lead Time (Date)", fontsize=10, fontweight="bold", labelpad=8)
+    ax2.tick_params(axis="both", labelsize=9, colors="#555555")
+    
+    ax2.grid(True, linestyle="--", alpha=0.4, color="#cccccc", linewidth=0.5)
+    fig2.autofmt_xdate()
+    
+    ax2.set_title(
+        f"S2S3 North Atlantic Cumulative TC-Conditioned ACE Curve\n"
+        f"Initialization: {init_date}  |  Ensemble: {ens}",
+        fontsize=12, fontweight="bold", pad=15, color="#1e222a"
+    )
+    
+    peak_ace = cumulative_ace_time[-1]
+    ax2.annotate(
+        f"Total ACE: {peak_ace:.2f}",
+        xy=(time_dates[-1], peak_ace),
+        xytext=(time_dates[-int(len(time_dates)*0.15)], peak_ace * 0.85),
+        arrowprops=dict(facecolor="#333333", shrink=0.08, width=1, headwidth=6, headlength=6),
+        fontsize=9, fontweight="bold", color="#e55934",
+        bbox=dict(boxstyle="round,pad=0.3", fc="#ffffff", ec="#e55934", lw=1, alpha=0.9)
+    )
 
+    temporal_plot_path = plot_dir / f"ace_accumulation_{init_date}_{ens}.png"
+    plt.savefig(temporal_plot_path, bbox_inches="tight", dpi=300)
+    plt.close()
+    print(f"  -> Saved accumulation curve to: {temporal_plot_path}")
+
+    # --------------------------------------------------------------------------
+    # PLOT 3: GLOBAL MULTI-BASIN TC-CONDITIONED ACE MAP
+    # --------------------------------------------------------------------------
+    fig3 = plt.figure(figsize=(14, 8), dpi=300)
+    
+    if HAS_CARTOPY:
+        projection = ccrs.PlateCarree(central_longitude=180.0)
+        ax3 = fig3.add_subplot(1, 1, 1, projection=projection)
+        ax3.set_global()
+        ax3.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)
+        
+        levels = np.linspace(0.005, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.005 else 5.0, 100)
+        contour3 = ax3.contourf(
+            lons_plot, latitudes, ace_plot,
+            levels=levels,
+            transform=ccrs.PlateCarree(),
+            cmap=ace_cmap,
+            zorder=1,
+            alpha=0.9
+        )
+        
+        ax3.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=2)
+        ax3.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.5, zorder=3)
+        ax3.add_feature(cfeature.BORDERS, edgecolor="#bbbbbb", linewidth=0.3, linestyle=":", zorder=3)
+        
+        gl3 = ax3.gridlines(draw_labels=True, linewidth=0.2, color="#aaaaaa", alpha=0.4, linestyle="--", zorder=4)
+        gl3.top_labels = False
+        gl3.right_labels = False
+        gl3.xlabel_style = {"size": 8, "color": "#555555"}
+        gl3.ylabel_style = {"size": 8, "color": "#555555"}
+    else:
+        ax3 = fig3.add_subplot(1, 1, 1)
+        ax3.set_facecolor("#daeefb")
+        levels = np.linspace(0.005, np.max(local_ace) * 1.05 if np.max(local_ace) > 0.005 else 5.0, 100)
+        contour3 = ax3.contourf(longitudes, latitudes, local_ace, levels=levels, cmap=ace_cmap)
+        ax3.set_xlim([-180.0, 180.0])
+        ax3.set_ylim([-60.0, 60.0])
+        ax3.set_xlabel("Longitude")
+        ax3.set_ylabel("Latitude")
+        ax3.grid(True, linewidth=0.2, color="#aaaaaa", alpha=0.4, linestyle="--")
+
+    for name, b_def in BASINS.items():
+        color = b_def["color"]
+        lat_min, lat_max = b_def["lat_range"]
+        
+        total_ace = 0.0
+        if basin_cumulative_ace and name in basin_cumulative_ace:
+            total_ace = float(basin_cumulative_ace[name][-1])
+            
+        if "lon_range" in b_def:
+            lon_min, lon_max = b_def["lon_range"]
+            lons_rect = [lon_min, lon_max, lon_max, lon_min, lon_min]
+            lats_rect = [lat_min, lat_min, lat_max, lat_max, lat_min]
+            if HAS_CARTOPY:
+                ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.8, linestyle="-", transform=ccrs.PlateCarree(), zorder=5)
+            else:
+                ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.8, linestyle="-", zorder=5)
+        else:
+            for lon_min, lon_max in b_def["lon_ranges"]:
+                lons_rect = [lon_min, lon_max, lon_max, lon_min, lon_min]
+                lats_rect = [lat_min, lat_min, lat_max, lat_max, lat_min]
+                if HAS_CARTOPY:
+                    ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.8, linestyle="-", transform=ccrs.PlateCarree(), zorder=5)
+                else:
+                    ax3.plot(lons_rect, lats_rect, color=color, linewidth=1.8, linestyle="-", zorder=5)
+                    
+        label_lon, label_lat = b_def["label_xy"]
+        bbox_props = dict(boxstyle="round,pad=0.3", fc="#ffffff", ec=color, lw=1.2, alpha=0.9)
+        
         if HAS_CARTOPY:
-            ax2.scatter(
-                lons,
-                lats,
-                s=sizes,
-                c=color,
-                alpha=0.75,
-                edgecolors="#222222",
-                linewidths=0.3,
+            ax3.text(
+                label_lon, label_lat, f"{name}\nACE: {total_ace:.2f}",
                 transform=ccrs.PlateCarree(),
-                label=basin_name,
-                zorder=4,
+                color="#1e222a", fontsize=8, fontweight="bold",
+                ha="center", va="center", bbox=bbox_props, zorder=6
             )
         else:
-            ax2.scatter(
-                lons,
-                lats,
-                s=sizes,
-                c=color,
-                alpha=0.75,
-                edgecolors="#222222",
-                linewidths=0.3,
-                label=basin_name,
-                zorder=4,
+            ax3.text(
+                label_lon, label_lat, f"{name}\nACE: {total_ace:.2f}",
+                color="#1e222a", fontsize=8, fontweight="bold",
+                ha="center", va="center", bbox=bbox_props, zorder=6
             )
 
-    ax2.set_title(
-        f"GEOS S2S3 TC-Conditioned Candidate Centers\nInitialization: {init_date}  |  Ensemble: {ens}",
-        fontsize=12,
-        fontweight="bold",
-        pad=12,
-        color="#1e222a",
+    cbar3 = fig3.colorbar(contour3, ax=ax3, orientation="horizontal", pad=0.08, aspect=45, shrink=0.75)
+    cbar3.set_label("TC-Conditioned Spatial ACE Index (10$^4$ kt$^2$)", fontsize=9, color="#333333", fontweight="bold", labelpad=6)
+    cbar3.ax.tick_params(labelsize=8, color="#555555", labelcolor="#333333")
+    cbar3.outline.set_visible(False)
+    
+    plt.title(
+        f"GEOS S2S3 Global Multi-Basin TC-Conditioned Accumulated Cyclone Energy (ACE) Map\n"
+        f"Initialization: {init_date}  |  Ensemble: {ens}  |  Season: Sep-Nov",
+        fontsize=13, fontweight="bold", pad=15, color="#1e222a"
     )
-    ax2.legend(frameon=False, fontsize=8, ncol=2, loc="lower left")
-    map_plot_path = plot_dir / f"tc_conditioned_centers_{init_date}_{ens}.png"
-    plt.savefig(map_plot_path, bbox_inches="tight", dpi=300)
-    plt.close(fig2)
-    print(f"  -> Saved accepted-center map to: {map_plot_path}")
-
-    # ------------------------------------------------------------------
-    # Plot 3: North Atlantic gate diagnostics
-    # ------------------------------------------------------------------
-    basin_name = "North Atlantic"
-    natl = diagnostics[basin_name]
-    fig3, axes = plt.subplots(4, 1, figsize=(11, 9), dpi=300, sharex=True)
-    fig3.patch.set_facecolor("#ffffff")
-    gate_specs = [
-        ("slp_anom_hpa", "SLP Anomaly (hPa)", "#33658a"),
-        ("warm_core_anom_k", "Warm-Core Anomaly (K)", "#f26419"),
-        ("qv850_anom_gpkg", "QV850 Anomaly (g kg$^{-1}$)", "#2a9d8f"),
-        ("vmax_kt", "Nearby Max SFC Wind (kt)", "#c1121f"),
-    ]
-
-    tc_mask = natl["tc_flag"] > 0
-    for ax, (field_name, ylabel, color) in zip(axes, gate_specs):
-        series = natl[field_name]
-        ax.plot(times, series, color=color, linewidth=1.8)
-        if np.any(tc_mask):
-            ax.scatter(np.asarray(times)[tc_mask], series[tc_mask], s=16, color="#111111", zorder=3)
-        ax.set_ylabel(ylabel, fontsize=9, fontweight="bold")
-        ax.set_facecolor("#fafafa")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.grid(True, linestyle="--", alpha=0.35, color="#cccccc", linewidth=0.5)
-        ax.tick_params(axis="both", labelsize=8, colors="#555555")
-        if field_name != "vmax_kt":
-            ax.axhline(0.0, color="#999999", linewidth=0.7, linestyle=":")
-
-    if uses_vorticity:
-        ax_vort = axes[-1].twinx()
-        ax_vort.plot(times, natl["vort850_s1"], color="#6a4c93", linewidth=1.2, alpha=0.8)
-        ax_vort.set_ylabel("850-hPa Vorticity (s$^{-1}$)", fontsize=8, color="#6a4c93")
-        ax_vort.tick_params(axis="y", labelsize=8, colors="#6a4c93")
-
-    axes[0].set_title(
-        f"North Atlantic TC Gate Diagnostics\nInitialization: {init_date}  |  Ensemble: {ens}",
-        fontsize=12,
-        fontweight="bold",
-        pad=12,
-        color="#1e222a",
-    )
-    axes[-1].set_xlabel("Forecast Lead Time (Date)", fontsize=10, fontweight="bold")
-    fig3.autofmt_xdate()
-    gate_plot_path = plot_dir / f"tc_conditioned_gate_natl_{init_date}_{ens}.png"
-    plt.savefig(gate_plot_path, bbox_inches="tight", dpi=300)
-    plt.close(fig3)
-    print(f"  -> Saved North Atlantic gate diagnostics to: {gate_plot_path}")
+    
+    global_plot_path = plot_dir / f"global_ace_map_{init_date}_{ens}.png"
+    plt.savefig(global_plot_path, bbox_inches="tight", dpi=300)
+    plt.close()
+    print(f"  -> Saved global multi-basin map to: {global_plot_path}\n")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -690,7 +860,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--plot-only-cache",
         default=None,
-        help="Read an existing tc_conditioned_ace_*.nc4 cache file and create plots without reprocessing SFC/ATM data.",
+        help="Read an existing NetCDF cache file and create plots without reprocessing SFC/ATM data.",
     )
     parser.add_argument(
         "--sfc-match-tolerance-hours",
@@ -714,7 +884,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--wind-search-radius-deg",
         type=float,
         default=3.0,
-        help="Radius around the candidate center used to search for max SFC wind",
+        help="Radius around the candidate center used to search for max SFC wind and accumulate spatial ACE",
+    )
+    parser.add_argument(
+        "--ts-threshold",
+        type=float,
+        default=TS_THRESHOLD_KNOTS_DEFAULT,
+        help=(
+            f"Wind speed threshold (knots) for ACE accumulation (default: {TS_THRESHOLD_KNOTS_DEFAULT}). "
+            "GEOS 0.5deg models underestimate TC intensity; the model-equivalent of the "
+            "observed 34-kt TS threshold is ~17-24 kt (Garcia-Franco et al. 2024). "
+            "Use 34.0 for observational/reanalysis data."
+        )
     )
     return parser.parse_args(argv)
 
@@ -722,8 +903,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     plot_dir = Path(args.plot_dir)
+    
     if args.plot_only_cache:
-        plot_tc_conditioned_ace_from_cache(Path(args.plot_only_cache), plot_dir)
+        init_date, ens, latitudes, longitudes, times, local_ace, diagnostics, uses_vorticity = read_cache(Path(args.plot_only_cache))
+        basin_cumulative_ace = {basin_name: data["cumulative_ace"] for basin_name, data in diagnostics.items()}
+        plot_ace_diagnostics(
+            local_ace=local_ace,
+            cumulative_ace_time=diagnostics["North Atlantic"]["cumulative_ace"],
+            time_dates=times,
+            latitudes=latitudes,
+            longitudes=longitudes,
+            init_date=init_date,
+            ens=ens,
+            plot_dir=plot_dir,
+            basin_cumulative_ace=basin_cumulative_ace,
+        )
         return 0
 
     forecast_months = set(parse_list(args.months))
@@ -747,14 +941,20 @@ def main(argv: list[str] | None = None) -> int:
     longitudes = sfc_index.longitudes
     assert latitudes is not None
     assert longitudes is not None
+    
     basin_coverage = {name: basin_has_coverage(latitudes, longitudes, basin_def) for name, basin_def in BASINS.items()}
 
+    # Compute coordinate indices for patch operations
     lat_env_radius = index_radius(latitudes, args.environment_radius_deg)
     lon_env_radius = index_radius(longitudes, args.environment_radius_deg)
     lat_core_radius = index_radius(latitudes, args.inner_core_radius_deg)
     lon_core_radius = index_radius(longitudes, args.inner_core_radius_deg)
     lat_wind_radius = index_radius(latitudes, args.wind_search_radius_deg)
     lon_wind_radius = index_radius(longitudes, args.wind_search_radius_deg)
+
+    # Initialize 2D spatial local ACE field
+    nlat_g, nlon_g = len(latitudes), len(longitudes)
+    local_ace = np.zeros((nlat_g, nlon_g), dtype="float64")
 
     diagnostics: dict[str, dict[str, list[float]]] = {
         basin_name: {
@@ -777,8 +977,9 @@ def main(argv: list[str] | None = None) -> int:
     uses_vorticity = False
 
     print("=" * 80)
-    print("GEOS S2S3 TC-CONDITIONED ACE DIAGNOSTICS")
+    print("GEOS S2S3 UNIFIED TC-CONDITIONED ACE DIAGNOSTICS")
     print(f"Initialization: {args.init_date}  Ensemble: {args.ens}")
+    print(f"TC Wind Threshold: {args.ts_threshold:.1f} kt")
     print(f"SFC files found: {len(sfc_files)}")
     print(f"ATM files found: {len(atm_files)}")
     print("=" * 80)
@@ -796,6 +997,7 @@ def main(argv: list[str] | None = None) -> int:
                 qv_name = find_first_variable(ds, QV_CANDIDATES)
                 u_name = find_first_variable(ds, U_CANDIDATES)
                 v_name = find_first_variable(ds, V_CANDIDATES)
+                
                 if slp_name is None or t_name is None or qv_name is None:
                     raise ValueError(
                         f"ATM file {atm_path.name} is missing one of the required variables: "
@@ -806,6 +1008,12 @@ def main(argv: list[str] | None = None) -> int:
                 time_values = ds.variables["time"][:]
                 time_units = ds.variables["time"].units
                 atm_times = [to_datetime(value) for value in netCDF4.num2date(time_values, time_units)]
+
+                # Compute dynamic sampling interval for correct scaling
+                time_diff_hours = 6.0
+                if len(atm_times) > 1:
+                    time_diff_hours = abs((atm_times[1] - atm_times[0]).total_seconds()) / 3600.0
+                scale_step = 1e-4 * (time_diff_hours / 6.0)
 
                 for time_index, valid_time in enumerate(atm_times):
                     if forecast_months and valid_time.strftime("%m") not in forecast_months:
@@ -857,9 +1065,27 @@ def main(argv: list[str] | None = None) -> int:
                             basin_diag["vort850_s1"].append(float("nan"))
                             continue
 
-                        center_lat_idx, center_lon_idx, center_slp = basin_candidate_center(slp_hpa, latitudes, longitudes, basin_def)
-                        center_lat = float(latitudes[center_lat_idx])
-                        center_lon = float(longitudes[center_lon_idx])
+                        # Robust candidate evaluation with exception handling to prevent crashes
+                        try:
+                            center_lat_idx, center_lon_idx, center_slp = basin_candidate_center(slp_hpa, latitudes, longitudes, basin_def)
+                            center_lat = float(latitudes[center_lat_idx])
+                            # Map saved center longitude to [-180, 180]
+                            center_lon = float((longitudes[center_lon_idx] + 180) % 360 - 180)
+                        except ValueError:
+                            # Safely ignore and fill step with NaNs
+                            basin_diag = diagnostics[basin_name]
+                            basin_diag["cumulative_ace"].append(basin_totals[basin_name])
+                            basin_diag["step_ace"].append(0.0)
+                            basin_diag["vmax_kt"].append(float("nan"))
+                            basin_diag["tc_flag"].append(0)
+                            basin_diag["center_lat"].append(float("nan"))
+                            basin_diag["center_lon"].append(float("nan"))
+                            basin_diag["slp_hpa"].append(float("nan"))
+                            basin_diag["slp_anom_hpa"].append(float("nan"))
+                            basin_diag["warm_core_anom_k"].append(float("nan"))
+                            basin_diag["qv850_anom_gpkg"].append(float("nan"))
+                            basin_diag["vort850_s1"].append(float("nan"))
+                            continue
 
                         slp_env = annulus_mean(
                             slp_hpa,
@@ -892,13 +1118,6 @@ def main(argv: list[str] | None = None) -> int:
                         slp_anom = center_slp - slp_env
                         warm_anom = float(warm_core_field[center_lat_idx, center_lon_idx] - warm_env)
                         qv_anom = float(qv850[center_lat_idx, center_lon_idx] - qv_env)
-                        vmax_kt, _, _ = max_near_center(
-                            sfc_ws_kt,
-                            center_lat_idx,
-                            center_lon_idx,
-                            lat_wind_radius,
-                            lon_wind_radius,
-                        )
 
                         criteria = [
                             slp_anom < 0.0,
@@ -912,14 +1131,46 @@ def main(argv: list[str] | None = None) -> int:
                             if np.isfinite(vort850):
                                 criteria.append(vort850 > 0.0 if center_lat >= 0.0 else vort850 < 0.0)
 
-                        tc_flag = int(all(criteria) and np.isfinite(vmax_kt))
-                        step_ace = float(vmax_kt**2 * 1e-4) if tc_flag else 0.0
+                        tc_flag = int(all(criteria))
+                        
+                        vmax_kt = float("nan")
+                        step_ace = 0.0
+                        if tc_flag:
+                            # Accumulate grid-point winds into spatial local_ace field near approved storm
+                            vmax_kt = accumulate_storm_ace(
+                                local_ace=local_ace,
+                                sfc_ws_kt=sfc_ws_kt,
+                                latitudes=latitudes,
+                                longitudes=longitudes,
+                                center_lat_idx=center_lat_idx,
+                                center_lon_idx=center_lon_idx,
+                                lat_radius=lat_wind_radius,
+                                lon_radius=lon_wind_radius,
+                                search_radius_deg=args.wind_search_radius_deg,
+                                ts_threshold_knots=args.ts_threshold,
+                                scale_step=scale_step,
+                            )
+                            
+                            # Increment integrated temporal curves using vmax within storm radius
+                            if np.isfinite(vmax_kt) and vmax_kt >= args.ts_threshold:
+                                step_ace = float(vmax_kt**2 * scale_step)
+                        else:
+                            # Evaluated peak wind for metadata diagnostics, even if rejected by structure gate
+                            raw_vmax, _, _ = max_near_center(
+                                sfc_ws_kt,
+                                center_lat_idx,
+                                center_lon_idx,
+                                lat_wind_radius,
+                                lon_wind_radius,
+                            )
+                            vmax_kt = float(raw_vmax)
+
                         basin_totals[basin_name] += step_ace
 
                         basin_diag = diagnostics[basin_name]
                         basin_diag["cumulative_ace"].append(basin_totals[basin_name])
                         basin_diag["step_ace"].append(step_ace)
-                        basin_diag["vmax_kt"].append(float(vmax_kt))
+                        basin_diag["vmax_kt"].append(vmax_kt)
                         basin_diag["tc_flag"].append(tc_flag)
                         basin_diag["center_lat"].append(center_lat)
                         basin_diag["center_lon"].append(center_lon)
@@ -934,8 +1185,21 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         output_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_{args.ens}.nc4"
-        write_cache(output_path, args.init_date, args.ens, valid_times, diagnostics, uses_vorticity)
-        plot_tc_conditioned_ace_from_cache(output_path, plot_dir)
+        write_cache(output_path, args.init_date, args.ens, latitudes, longitudes, valid_times, local_ace, diagnostics, uses_vorticity)
+        
+        # Load curves to plot
+        basin_cumulative_ace = {name: np.array(data["cumulative_ace"]) for name, data in diagnostics.items()}
+        plot_ace_diagnostics(
+            local_ace=local_ace,
+            cumulative_ace_time=basin_cumulative_ace["North Atlantic"],
+            time_dates=valid_times,
+            latitudes=latitudes,
+            longitudes=longitudes,
+            init_date=args.init_date,
+            ens=args.ens,
+            plot_dir=plot_dir,
+            basin_cumulative_ace=basin_cumulative_ace,
+        )
 
         print("=" * 80)
         print(f"Wrote cache: {output_path}")
