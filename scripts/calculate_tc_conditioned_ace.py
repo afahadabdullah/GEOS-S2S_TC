@@ -851,7 +851,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sfc-root", default=os.environ.get("SFC_ROOT", DEFAULT_SFC_ROOT))
     parser.add_argument("--atm-root", default=os.environ.get("ATM_ROOT", DEFAULT_ATM_ROOT))
     parser.add_argument("--init-date", required=True, help="Forecast initialization date, e.g. 20200824")
-    parser.add_argument("--ens", default="ens1", help="Ensemble member directory name (default: ens1)")
+    parser.add_argument(
+        "--ens",
+        default="all",
+        help="Ensemble member directory name, comma-separated list, or 'all' to process all discovered members (default: all)",
+    )
     parser.add_argument("--sfc-collection", default=DEFAULT_SFC_COLLECTION)
     parser.add_argument("--atm-collection", default=DEFAULT_ATM_COLLECTION)
     parser.add_argument("--months", default="09,10,11", help="Forecast months to use, separated by commas")
@@ -926,291 +930,330 @@ def main(argv: list[str] | None = None) -> int:
     atm_root = Path(args.atm_root)
     cache_dir = Path(args.cache_dir)
 
-    sfc_files = discover_collection_files(sfc_root, args.init_date, args.ens, args.sfc_collection)
-    atm_files = discover_collection_files(atm_root, args.init_date, args.ens, args.atm_collection)
-
-    if not sfc_files:
-        print("ERROR: No SFC files found for the requested init/ens/collection", file=sys.stderr)
-        return 1
-    if not atm_files:
-        print("ERROR: No ATM files found for the requested init/ens/collection", file=sys.stderr)
-        return 1
-
-    sfc_index = SFCIndex(sfc_files, args.sfc_collection, forecast_months)
-    latitudes = sfc_index.latitudes
-    longitudes = sfc_index.longitudes
-    assert latitudes is not None
-    assert longitudes is not None
-    
-    basin_coverage = {name: basin_has_coverage(latitudes, longitudes, basin_def) for name, basin_def in BASINS.items()}
-
-    # Compute coordinate indices for patch operations
-    lat_env_radius = index_radius(latitudes, args.environment_radius_deg)
-    lon_env_radius = index_radius(longitudes, args.environment_radius_deg)
-    lat_core_radius = index_radius(latitudes, args.inner_core_radius_deg)
-    lon_core_radius = index_radius(longitudes, args.inner_core_radius_deg)
-    lat_wind_radius = index_radius(latitudes, args.wind_search_radius_deg)
-    lon_wind_radius = index_radius(longitudes, args.wind_search_radius_deg)
-
-    # Initialize 2D spatial local ACE field
-    nlat_g, nlon_g = len(latitudes), len(longitudes)
-    local_ace = np.zeros((nlat_g, nlon_g), dtype="float64")
-
-    diagnostics: dict[str, dict[str, list[float]]] = {
-        basin_name: {
-            "cumulative_ace": [],
-            "step_ace": [],
-            "vmax_kt": [],
-            "tc_flag": [],
-            "center_lat": [],
-            "center_lon": [],
-            "slp_hpa": [],
-            "slp_anom_hpa": [],
-            "warm_core_anom_k": [],
-            "qv850_anom_gpkg": [],
-            "vort850_s1": [],
-        }
-        for basin_name in BASINS
-    }
-    basin_totals = {basin_name: 0.0 for basin_name in BASINS}
-    valid_times: list[datetime] = []
-    uses_vorticity = False
+    # 1. Determine list of ensemble members to process
+    ens_input = args.ens.strip()
+    if ens_input.lower() == "all":
+        sfc_fcst_dir = sfc_root / "GEOS_fcst" / args.init_date
+        if not sfc_fcst_dir.is_dir():
+            print(f"ERROR: Initialization directory {sfc_fcst_dir} does not exist", file=sys.stderr)
+            return 1
+        ens_list = sorted([d.name for d in sfc_fcst_dir.iterdir() if d.is_dir() and not d.name.startswith(".")])
+        if not ens_list:
+            print(f"ERROR: No ensemble directories found in {sfc_fcst_dir}", file=sys.stderr)
+            return 1
+    else:
+        ens_list = [e.strip() for e in ens_input.split(",") if e.strip()]
 
     print("=" * 80)
     print("GEOS S2S3 UNIFIED TC-CONDITIONED ACE DIAGNOSTICS")
-    print(f"Initialization: {args.init_date}  Ensemble: {args.ens}")
+    print(f"Initialization: {args.init_date}")
+    print(f"Target Ensembles: {', '.join(ens_list)}")
     print(f"TC Wind Threshold: {args.ts_threshold:.1f} kt")
-    print(f"SFC files found: {len(sfc_files)}")
-    print(f"ATM files found: {len(atm_files)}")
     print("=" * 80)
 
-    try:
-        for atm_path in atm_files:
-            yyyymm = forecast_yyyymm(atm_path.name, args.atm_collection)
-            if forecast_months and (yyyymm is None or yyyymm[-2:] not in forecast_months):
+    processed_count = 0
+
+    for ens_member in ens_list:
+        print("\n" + "-" * 80)
+        print(f"PROCESSING ENSEMBLE MEMBER: {ens_member}")
+        print("-" * 80)
+
+        sfc_files = discover_collection_files(sfc_root, args.init_date, ens_member, args.sfc_collection)
+        atm_files = discover_collection_files(atm_root, args.init_date, ens_member, args.atm_collection)
+
+        if not sfc_files:
+            print(f"WARNING: Skipping member '{ens_member}' as no SFC files were found under {sfc_root}.")
+            continue
+        if not atm_files:
+            print(f"WARNING: Skipping member '{ens_member}' as no ATM files were found under {atm_root}.")
+            continue
+
+        try:
+            sfc_index = SFCIndex(sfc_files, args.sfc_collection, forecast_months)
+        except Exception as e:
+            print(f"WARNING: Skipping member '{ens_member}' due to indexing failure: {e}")
+            continue
+
+        try:
+            latitudes = sfc_index.latitudes
+            longitudes = sfc_index.longitudes
+            if latitudes is None or longitudes is None:
+                print(f"WARNING: Skipping member '{ens_member}' due to missing latitude/longitude coordinates.")
                 continue
+            
+            basin_coverage = {name: basin_has_coverage(latitudes, longitudes, basin_def) for name, basin_def in BASINS.items()}
 
-            print(f"Reading ATM file: {atm_path.name}")
-            with netCDF4.Dataset(atm_path, "r") as ds:
-                slp_name = find_first_variable(ds, SLP_CANDIDATES)
-                t_name = find_first_variable(ds, T_CANDIDATES)
-                qv_name = find_first_variable(ds, QV_CANDIDATES)
-                u_name = find_first_variable(ds, U_CANDIDATES)
-                v_name = find_first_variable(ds, V_CANDIDATES)
-                
-                if slp_name is None or t_name is None or qv_name is None:
-                    raise ValueError(
-                        f"ATM file {atm_path.name} is missing one of the required variables: "
-                        f"SLP={slp_name}, T={t_name}, QV={qv_name}"
-                    )
+            # Compute coordinate indices for patch operations
+            lat_env_radius = index_radius(latitudes, args.environment_radius_deg)
+            lon_env_radius = index_radius(longitudes, args.environment_radius_deg)
+            lat_core_radius = index_radius(latitudes, args.inner_core_radius_deg)
+            lon_core_radius = index_radius(longitudes, args.inner_core_radius_deg)
+            lat_wind_radius = index_radius(latitudes, args.wind_search_radius_deg)
+            lon_wind_radius = index_radius(longitudes, args.wind_search_radius_deg)
 
-                level_dim, level_indices = detect_vertical_dim(ds, (850.0, 500.0, 200.0))
-                time_values = ds.variables["time"][:]
-                time_units = ds.variables["time"].units
-                atm_times = [to_datetime(value) for value in netCDF4.num2date(time_values, time_units)]
+            # Initialize 2D spatial local ACE field
+            nlat_g, nlon_g = len(latitudes), len(longitudes)
+            local_ace = np.zeros((nlat_g, nlon_g), dtype="float64")
 
-                # Compute dynamic sampling interval for correct scaling
-                time_diff_hours = 6.0
-                if len(atm_times) > 1:
-                    time_diff_hours = abs((atm_times[1] - atm_times[0]).total_seconds()) / 3600.0
-                scale_step = 1e-4 * (time_diff_hours / 6.0)
+            diagnostics: dict[str, dict[str, list[float]]] = {
+                basin_name: {
+                    "cumulative_ace": [],
+                    "step_ace": [],
+                    "vmax_kt": [],
+                    "tc_flag": [],
+                    "center_lat": [],
+                    "center_lon": [],
+                    "slp_hpa": [],
+                    "slp_anom_hpa": [],
+                    "warm_core_anom_k": [],
+                    "qv850_anom_gpkg": [],
+                    "vort850_s1": [],
+                }
+                for basin_name in BASINS
+            }
+            basin_totals = {basin_name: 0.0 for basin_name in BASINS}
+            valid_times: list[datetime] = []
+            uses_vorticity = False
 
-                for time_index, valid_time in enumerate(atm_times):
-                    if forecast_months and valid_time.strftime("%m") not in forecast_months:
-                        continue
+            print(f"SFC files: {len(sfc_files)} | ATM files: {len(atm_files)}")
 
-                    sfc_match = sfc_index.nearest(valid_time, args.sfc_match_tolerance_hours)
-                    if sfc_match is None:
-                        print(f"  Skipping {valid_time}: no matching SFC time within tolerance")
-                        continue
+            for atm_path in atm_files:
+                yyyymm = forecast_yyyymm(atm_path.name, args.atm_collection)
+                if forecast_months and (yyyymm is None or yyyymm[-2:] not in forecast_months):
+                    continue
 
-                    us_sfc, vs_sfc = sfc_index.load_wind(sfc_match)
-                    sfc_ws_kt = np.sqrt(us_sfc**2 + vs_sfc**2) * MPS_TO_KNOTS
+                print(f"  Reading ATM file: {atm_path.name}")
+                with netCDF4.Dataset(atm_path, "r") as ds:
+                    slp_name = find_first_variable(ds, SLP_CANDIDATES)
+                    t_name = find_first_variable(ds, T_CANDIDATES)
+                    qv_name = find_first_variable(ds, QV_CANDIDATES)
+                    u_name = find_first_variable(ds, U_CANDIDATES)
+                    v_name = find_first_variable(ds, V_CANDIDATES)
+                    
+                    if slp_name is None or t_name is None or qv_name is None:
+                        raise ValueError(
+                            f"ATM file {atm_path.name} is missing one of the required variables: "
+                            f"SLP={slp_name}, T={t_name}, QV={qv_name}"
+                        )
 
-                    slp_hpa = slp_to_hpa(
-                        read_2d_field(ds.variables[slp_name], time_index=time_index),
-                        getattr(ds.variables[slp_name], "units", ""),
-                    )
-                    t850 = read_2d_field(ds.variables[t_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[850.0])
-                    t500 = read_2d_field(ds.variables[t_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[500.0])
-                    t200 = read_2d_field(ds.variables[t_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[200.0])
-                    qv850 = qv_to_gpkg(
-                        read_2d_field(ds.variables[qv_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[850.0]),
-                        getattr(ds.variables[qv_name], "units", ""),
-                    )
+                    level_dim, level_indices = detect_vertical_dim(ds, (850.0, 500.0, 200.0))
+                    time_values = ds.variables["time"][:]
+                    time_units = ds.variables["time"].units
+                    atm_times = [to_datetime(value) for value in netCDF4.num2date(time_values, time_units)]
 
-                    warm_core_field = 0.5 * (t500 + t200) - t850
-                    u850 = None
-                    v850 = None
-                    if u_name is not None and v_name is not None:
-                        u850 = read_2d_field(ds.variables[u_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[850.0])
-                        v850 = read_2d_field(ds.variables[v_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[850.0])
-                        uses_vorticity = True
+                    # Compute dynamic sampling interval for correct scaling
+                    time_diff_hours = 6.0
+                    if len(atm_times) > 1:
+                        time_diff_hours = abs((atm_times[1] - atm_times[0]).total_seconds()) / 3600.0
+                    scale_step = 1e-4 * (time_diff_hours / 6.0)
 
-                    valid_times.append(valid_time)
-
-                    for basin_name, basin_def in BASINS.items():
-                        if not basin_coverage[basin_name]:
-                            basin_diag = diagnostics[basin_name]
-                            basin_diag["cumulative_ace"].append(basin_totals[basin_name])
-                            basin_diag["step_ace"].append(0.0)
-                            basin_diag["vmax_kt"].append(float("nan"))
-                            basin_diag["tc_flag"].append(0)
-                            basin_diag["center_lat"].append(float("nan"))
-                            basin_diag["center_lon"].append(float("nan"))
-                            basin_diag["slp_hpa"].append(float("nan"))
-                            basin_diag["slp_anom_hpa"].append(float("nan"))
-                            basin_diag["warm_core_anom_k"].append(float("nan"))
-                            basin_diag["qv850_anom_gpkg"].append(float("nan"))
-                            basin_diag["vort850_s1"].append(float("nan"))
+                    for time_index, valid_time in enumerate(atm_times):
+                        if forecast_months and valid_time.strftime("%m") not in forecast_months:
                             continue
 
-                        # Robust candidate evaluation with exception handling to prevent crashes
-                        try:
-                            center_lat_idx, center_lon_idx, center_slp = basin_candidate_center(slp_hpa, latitudes, longitudes, basin_def)
-                            center_lat = float(latitudes[center_lat_idx])
-                            # Map saved center longitude to [-180, 180]
-                            center_lon = float((longitudes[center_lon_idx] + 180) % 360 - 180)
-                        except ValueError:
-                            # Safely ignore and fill step with NaNs
-                            basin_diag = diagnostics[basin_name]
-                            basin_diag["cumulative_ace"].append(basin_totals[basin_name])
-                            basin_diag["step_ace"].append(0.0)
-                            basin_diag["vmax_kt"].append(float("nan"))
-                            basin_diag["tc_flag"].append(0)
-                            basin_diag["center_lat"].append(float("nan"))
-                            basin_diag["center_lon"].append(float("nan"))
-                            basin_diag["slp_hpa"].append(float("nan"))
-                            basin_diag["slp_anom_hpa"].append(float("nan"))
-                            basin_diag["warm_core_anom_k"].append(float("nan"))
-                            basin_diag["qv850_anom_gpkg"].append(float("nan"))
-                            basin_diag["vort850_s1"].append(float("nan"))
+                        sfc_match = sfc_index.nearest(valid_time, args.sfc_match_tolerance_hours)
+                        if sfc_match is None:
+                            print(f"    Skipping {valid_time}: no matching SFC time within tolerance")
                             continue
 
-                        slp_env = annulus_mean(
-                            slp_hpa,
-                            center_lat_idx,
-                            center_lon_idx,
-                            lat_env_radius,
-                            lon_env_radius,
-                            lat_core_radius,
-                            lon_core_radius,
+                        us_sfc, vs_sfc = sfc_index.load_wind(sfc_match)
+                        sfc_ws_kt = np.sqrt(us_sfc**2 + vs_sfc**2) * MPS_TO_KNOTS
+
+                        slp_hpa = slp_to_hpa(
+                            read_2d_field(ds.variables[slp_name], time_index=time_index),
+                            getattr(ds.variables[slp_name], "units", ""),
                         )
-                        warm_env = annulus_mean(
-                            warm_core_field,
-                            center_lat_idx,
-                            center_lon_idx,
-                            lat_env_radius,
-                            lon_env_radius,
-                            lat_core_radius,
-                            lon_core_radius,
-                        )
-                        qv_env = annulus_mean(
-                            qv850,
-                            center_lat_idx,
-                            center_lon_idx,
-                            lat_env_radius,
-                            lon_env_radius,
-                            lat_core_radius,
-                            lon_core_radius,
+                        t850 = read_2d_field(ds.variables[t_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[850.0])
+                        t500 = read_2d_field(ds.variables[t_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[500.0])
+                        t200 = read_2d_field(ds.variables[t_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[200.0])
+                        qv850 = qv_to_gpkg(
+                            read_2d_field(ds.variables[qv_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[850.0]),
+                            getattr(ds.variables[qv_name], "units", ""),
                         )
 
-                        slp_anom = center_slp - slp_env
-                        warm_anom = float(warm_core_field[center_lat_idx, center_lon_idx] - warm_env)
-                        qv_anom = float(qv850[center_lat_idx, center_lon_idx] - qv_env)
+                        warm_core_field = 0.5 * (t500 + t200) - t850
+                        u850 = None
+                        v850 = None
+                        if u_name is not None and v_name is not None:
+                            u850 = read_2d_field(ds.variables[u_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[850.0])
+                            v850 = read_2d_field(ds.variables[v_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[850.0])
+                            uses_vorticity = True
 
-                        criteria = [
-                            slp_anom < 0.0,
-                            warm_anom > 0.0,
-                            qv_anom > 0.0,
-                        ]
+                        valid_times.append(valid_time)
 
-                        vort850 = float("nan")
-                        if u850 is not None and v850 is not None:
-                            vort850 = relative_vorticity(u850, v850, latitudes, longitudes, center_lat_idx, center_lon_idx)
-                            if np.isfinite(vort850):
-                                criteria.append(vort850 > 0.0 if center_lat >= 0.0 else vort850 < 0.0)
+                        for basin_name, basin_def in BASINS.items():
+                            if not basin_coverage[basin_name]:
+                                basin_diag = diagnostics[basin_name]
+                                basin_diag["cumulative_ace"].append(basin_totals[basin_name])
+                                basin_diag["step_ace"].append(0.0)
+                                basin_diag["vmax_kt"].append(float("nan"))
+                                basin_diag["tc_flag"].append(0)
+                                basin_diag["center_lat"].append(float("nan"))
+                                basin_diag["center_lon"].append(float("nan"))
+                                basin_diag["slp_hpa"].append(float("nan"))
+                                basin_diag["slp_anom_hpa"].append(float("nan"))
+                                basin_diag["warm_core_anom_k"].append(float("nan"))
+                                basin_diag["qv850_anom_gpkg"].append(float("nan"))
+                                basin_diag["vort850_s1"].append(float("nan"))
+                                continue
 
-                        tc_flag = int(all(criteria))
-                        
-                        vmax_kt = float("nan")
-                        step_ace = 0.0
-                        if tc_flag:
-                            # Accumulate grid-point winds into spatial local_ace field near approved storm
-                            vmax_kt = accumulate_storm_ace(
-                                local_ace=local_ace,
-                                sfc_ws_kt=sfc_ws_kt,
-                                latitudes=latitudes,
-                                longitudes=longitudes,
-                                center_lat_idx=center_lat_idx,
-                                center_lon_idx=center_lon_idx,
-                                lat_radius=lat_wind_radius,
-                                lon_radius=lon_wind_radius,
-                                search_radius_deg=args.wind_search_radius_deg,
-                                ts_threshold_knots=args.ts_threshold,
-                                scale_step=scale_step,
-                            )
-                            
-                            # Increment integrated temporal curves using vmax within storm radius
-                            if np.isfinite(vmax_kt) and vmax_kt >= args.ts_threshold:
-                                step_ace = float(vmax_kt**2 * scale_step)
-                        else:
-                            # Evaluated peak wind for metadata diagnostics, even if rejected by structure gate
-                            raw_vmax, _, _ = max_near_center(
-                                sfc_ws_kt,
+                            # Robust candidate evaluation with exception handling to prevent crashes
+                            try:
+                                center_lat_idx, center_lon_idx, center_slp = basin_candidate_center(slp_hpa, latitudes, longitudes, basin_def)
+                                center_lat = float(latitudes[center_lat_idx])
+                                # Map saved center longitude to [-180, 180]
+                                center_lon = float((longitudes[center_lon_idx] + 180) % 360 - 180)
+                            except ValueError:
+                                # Safely ignore and fill step with NaNs
+                                basin_diag = diagnostics[basin_name]
+                                basin_diag["cumulative_ace"].append(basin_totals[basin_name])
+                                basin_diag["step_ace"].append(0.0)
+                                basin_diag["vmax_kt"].append(float("nan"))
+                                basin_diag["tc_flag"].append(0)
+                                basin_diag["center_lat"].append(float("nan"))
+                                basin_diag["center_lon"].append(float("nan"))
+                                basin_diag["slp_hpa"].append(float("nan"))
+                                basin_diag["slp_anom_hpa"].append(float("nan"))
+                                basin_diag["warm_core_anom_k"].append(float("nan"))
+                                basin_diag["qv850_anom_gpkg"].append(float("nan"))
+                                basin_diag["vort850_s1"].append(float("nan"))
+                                continue
+
+                            slp_env = annulus_mean(
+                                slp_hpa,
                                 center_lat_idx,
                                 center_lon_idx,
-                                lat_wind_radius,
-                                lon_wind_radius,
+                                lat_env_radius,
+                                lon_env_radius,
+                                lat_core_radius,
+                                lon_core_radius,
                             )
-                            vmax_kt = float(raw_vmax)
+                            warm_env = annulus_mean(
+                                warm_core_field,
+                                center_lat_idx,
+                                center_lon_idx,
+                                lat_env_radius,
+                                lon_env_radius,
+                                lat_core_radius,
+                                lon_core_radius,
+                            )
+                            qv_env = annulus_mean(
+                                qv850,
+                                center_lat_idx,
+                                center_lon_idx,
+                                lat_env_radius,
+                                lon_env_radius,
+                                lat_core_radius,
+                                lon_core_radius,
+                            )
 
-                        basin_totals[basin_name] += step_ace
+                            slp_anom = center_slp - slp_env
+                            warm_anom = float(warm_core_field[center_lat_idx, center_lon_idx] - warm_env)
+                            qv_anom = float(qv850[center_lat_idx, center_lon_idx] - qv_env)
 
-                        basin_diag = diagnostics[basin_name]
-                        basin_diag["cumulative_ace"].append(basin_totals[basin_name])
-                        basin_diag["step_ace"].append(step_ace)
-                        basin_diag["vmax_kt"].append(vmax_kt)
-                        basin_diag["tc_flag"].append(tc_flag)
-                        basin_diag["center_lat"].append(center_lat)
-                        basin_diag["center_lon"].append(center_lon)
-                        basin_diag["slp_hpa"].append(float(center_slp))
-                        basin_diag["slp_anom_hpa"].append(float(slp_anom))
-                        basin_diag["warm_core_anom_k"].append(float(warm_anom))
-                        basin_diag["qv850_anom_gpkg"].append(float(qv_anom))
-                        basin_diag["vort850_s1"].append(float(vort850))
+                            criteria = [
+                                slp_anom < 0.0,
+                                warm_anom > 0.0,
+                                qv_anom > 0.0,
+                            ]
 
-        if not valid_times:
-            print("ERROR: No valid ATM/SFC time matches were processed", file=sys.stderr)
-            return 1
+                            vort850 = float("nan")
+                            if u850 is not None and v850 is not None:
+                                vort850 = relative_vorticity(u850, v850, latitudes, longitudes, center_lat_idx, center_lon_idx)
+                                if np.isfinite(vort850):
+                                    criteria.append(vort850 > 0.0 if center_lat >= 0.0 else vort850 < 0.0)
 
-        output_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_{args.ens}.nc4"
-        write_cache(output_path, args.init_date, args.ens, latitudes, longitudes, valid_times, local_ace, diagnostics, uses_vorticity)
-        
-        # Load curves to plot
-        basin_cumulative_ace = {name: np.array(data["cumulative_ace"]) for name, data in diagnostics.items()}
-        plot_ace_diagnostics(
-            local_ace=local_ace,
-            cumulative_ace_time=basin_cumulative_ace["North Atlantic"],
-            time_dates=valid_times,
-            latitudes=latitudes,
-            longitudes=longitudes,
-            init_date=args.init_date,
-            ens=args.ens,
-            plot_dir=plot_dir,
-            basin_cumulative_ace=basin_cumulative_ace,
-        )
+                            tc_flag = int(all(criteria))
+                            
+                            vmax_kt = float("nan")
+                            step_ace = 0.0
+                            if tc_flag:
+                                # Accumulate grid-point winds into spatial local_ace field near approved storm
+                                vmax_kt = accumulate_storm_ace(
+                                    local_ace=local_ace,
+                                    sfc_ws_kt=sfc_ws_kt,
+                                    latitudes=latitudes,
+                                    longitudes=longitudes,
+                                    center_lat_idx=center_lat_idx,
+                                    center_lon_idx=center_lon_idx,
+                                    lat_radius=lat_wind_radius,
+                                    lon_radius=lon_wind_radius,
+                                    search_radius_deg=args.wind_search_radius_deg,
+                                    ts_threshold_knots=args.ts_threshold,
+                                    scale_step=scale_step,
+                                )
+                                
+                                # Increment integrated temporal curves using vmax within storm radius
+                                if np.isfinite(vmax_kt) and vmax_kt >= args.ts_threshold:
+                                    step_ace = float(vmax_kt**2 * scale_step)
+                            else:
+                                # Evaluated peak wind for metadata diagnostics, even if rejected by structure gate
+                                raw_vmax, _, _ = max_near_center(
+                                    sfc_ws_kt,
+                                    center_lat_idx,
+                                    center_lon_idx,
+                                    lat_wind_radius,
+                                    lon_wind_radius,
+                                )
+                                vmax_kt = float(raw_vmax)
 
-        print("=" * 80)
-        print(f"Wrote cache: {output_path}")
-        for basin_name in BASINS:
-            total_ace = diagnostics[basin_name]["cumulative_ace"][-1]
-            hits = int(np.sum(diagnostics[basin_name]["tc_flag"]))
-            print(f"{basin_name:18s} total_ace={total_ace:8.2f}  tc_hits={hits}")
-        print("=" * 80)
-        return 0
-    finally:
-        sfc_index.close()
+                            basin_totals[basin_name] += step_ace
+
+                            basin_diag = diagnostics[basin_name]
+                            basin_diag["cumulative_ace"].append(basin_totals[basin_name])
+                            basin_diag["step_ace"].append(step_ace)
+                            basin_diag["vmax_kt"].append(vmax_kt)
+                            basin_diag["tc_flag"].append(tc_flag)
+                            basin_diag["center_lat"].append(center_lat)
+                            basin_diag["center_lon"].append(center_lon)
+                            basin_diag["slp_hpa"].append(float(center_slp))
+                            basin_diag["slp_anom_hpa"].append(float(slp_anom))
+                            basin_diag["warm_core_anom_k"].append(float(warm_anom))
+                            basin_diag["qv850_anom_gpkg"].append(float(qv_anom))
+                            basin_diag["vort850_s1"].append(float(vort850))
+
+            if not valid_times:
+                print(f"WARNING: No valid ATM/SFC time matches were processed for '{ens_member}'. Skipping cache/plot generation.")
+                continue
+
+            output_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_{ens_member}.nc4"
+            write_cache(output_path, args.init_date, ens_member, latitudes, longitudes, valid_times, local_ace, diagnostics, uses_vorticity)
+            
+            # Load curves to plot
+            basin_cumulative_ace = {name: np.array(data["cumulative_ace"]) for name, data in diagnostics.items()}
+            plot_ace_diagnostics(
+                local_ace=local_ace,
+                cumulative_ace_time=basin_cumulative_ace["North Atlantic"],
+                time_dates=valid_times,
+                latitudes=latitudes,
+                longitudes=longitudes,
+                init_date=args.init_date,
+                ens=ens_member,
+                plot_dir=plot_dir,
+                basin_cumulative_ace=basin_cumulative_ace,
+            )
+
+            print("=" * 80)
+            print(f"Wrote cache: {output_path}")
+            for basin_name in BASINS:
+                total_ace = diagnostics[basin_name]["cumulative_ace"][-1]
+                hits = int(np.sum(diagnostics[basin_name]["tc_flag"]))
+                print(f"{basin_name:18s} total_ace={total_ace:8.2f}  tc_hits={hits}")
+            print("=" * 80)
+            processed_count += 1
+
+        except Exception as e:
+            print(f"ERROR: Failed processing ensemble member '{ens_member}': {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            sfc_index.close()
+
+    if processed_count == 0:
+        print("ERROR: No ensemble members were successfully processed.", file=sys.stderr)
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":
