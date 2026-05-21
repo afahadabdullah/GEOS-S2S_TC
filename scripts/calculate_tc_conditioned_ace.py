@@ -498,7 +498,19 @@ def write_cache(
     local_ace_monthly: dict[str, np.ndarray] | None = None,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    init_dt = datetime.strptime(init_date, "%Y%m%d")
+    try:
+        init_dt = datetime.strptime(init_date, "%Y%m%d")
+    except ValueError:
+        # Robust fallback for lagged ensembles (e.g. "202008_lagged") or other formats
+        match = re.match(r"^(\d{6})", init_date)
+        if match:
+            init_dt = datetime.strptime(match.group(1) + "01", "%Y%m%d")
+        else:
+            if valid_times:
+                init_dt = datetime(valid_times[0].year, valid_times[0].month, 1)
+            else:
+                init_dt = datetime(2020, 1, 1)
+    
     time_hours = np.array([(value - init_dt).total_seconds() / 3600.0 for value in valid_times], dtype="float32")
 
     with netCDF4.Dataset(output_path, "w", format="NETCDF4") as ds:
