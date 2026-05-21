@@ -901,6 +901,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Use 34.0 for observational/reanalysis data."
         )
     )
+    parser.add_argument(
+        "--plot-individual",
+        action="store_true",
+        help="Generate visual diagnostic plots for each individual ensemble member (default: False)",
+    )
     return parser.parse_args(argv)
 
 
@@ -965,21 +970,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[Cache] Found existing cache for '{ens_member}': {member_cache_path.name}")
             try:
                 c_init, c_ens, c_lats, c_lons, c_times, c_local_ace, c_diag, c_vort = read_cache(member_cache_path)
-                print(f"[Cache] Successfully loaded cached diagnostics. Regenerating plots to ensure completeness...")
-                
-                # Regenerate plots in case styling updated
-                basin_cumulative_ace = {name: np.asarray(data["cumulative_ace"]) for name, data in c_diag.items()}
-                plot_ace_diagnostics(
-                    local_ace=c_local_ace,
-                    cumulative_ace_time=basin_cumulative_ace["North Atlantic"],
-                    time_dates=c_times,
-                    latitudes=c_lats,
-                    longitudes=c_lons,
-                    init_date=c_init,
-                    ens=c_ens,
-                    plot_dir=plot_dir,
-                    basin_cumulative_ace=basin_cumulative_ace,
-                )
+                if args.plot_individual:
+                    print(f"[Cache] Successfully loaded cached diagnostics. Regenerating plots to ensure completeness...")
+                    # Regenerate plots in case styling updated
+                    basin_cumulative_ace = {name: np.asarray(data["cumulative_ace"]) for name, data in c_diag.items()}
+                    plot_ace_diagnostics(
+                        local_ace=c_local_ace,
+                        cumulative_ace_time=basin_cumulative_ace["North Atlantic"],
+                        time_dates=c_times,
+                        latitudes=c_lats,
+                        longitudes=c_lons,
+                        init_date=c_init,
+                        ens=c_ens,
+                        plot_dir=plot_dir,
+                        basin_cumulative_ace=basin_cumulative_ace,
+                    )
+                else:
+                    print(f"[Cache] Successfully loaded cached diagnostics for '{ens_member}'. Skipping individual plots.")
                 
                 # Make sure the diagnostics dict values are np.asarray for ensmean consistency
                 np_diagnostics = {}
@@ -1256,17 +1263,18 @@ def main(argv: list[str] | None = None) -> int:
             
             # Load curves to plot
             basin_cumulative_ace = {name: np.array(data["cumulative_ace"]) for name, data in diagnostics.items()}
-            plot_ace_diagnostics(
-                local_ace=local_ace,
-                cumulative_ace_time=basin_cumulative_ace["North Atlantic"],
-                time_dates=valid_times,
-                latitudes=latitudes,
-                longitudes=longitudes,
-                init_date=args.init_date,
-                ens=ens_member,
-                plot_dir=plot_dir,
-                basin_cumulative_ace=basin_cumulative_ace,
-            )
+            if args.plot_individual:
+                plot_ace_diagnostics(
+                    local_ace=local_ace,
+                    cumulative_ace_time=basin_cumulative_ace["North Atlantic"],
+                    time_dates=valid_times,
+                    latitudes=latitudes,
+                    longitudes=longitudes,
+                    init_date=args.init_date,
+                    ens=ens_member,
+                    plot_dir=plot_dir,
+                    basin_cumulative_ace=basin_cumulative_ace,
+                )
 
             # Convert diagnostics to np.asarray values for consistency with c_diag loaded from NetCDF
             np_diagnostics = {}
