@@ -952,11 +952,46 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 80)
 
     processed_count = 0
+    all_member_results = []
 
     for ens_member in ens_list:
         print("\n" + "-" * 80)
         print(f"PROCESSING ENSEMBLE MEMBER: {ens_member}")
         print("-" * 80)
+
+        # Check if cache file already exists and load it if it does
+        member_cache_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_{ens_member}.nc4"
+        if member_cache_path.is_file():
+            print(f"[Cache] Found existing cache for '{ens_member}': {member_cache_path.name}")
+            try:
+                c_init, c_ens, c_lats, c_lons, c_times, c_local_ace, c_diag, c_vort = read_cache(member_cache_path)
+                print(f"[Cache] Successfully loaded cached diagnostics. Regenerating plots to ensure completeness...")
+                
+                # Regenerate plots in case styling updated
+                basin_cumulative_ace = {name: np.asarray(data["cumulative_ace"]) for name, data in c_diag.items()}
+                plot_ace_diagnostics(
+                    local_ace=c_local_ace,
+                    cumulative_ace_time=basin_cumulative_ace["North Atlantic"],
+                    time_dates=c_times,
+                    latitudes=c_lats,
+                    longitudes=c_lons,
+                    init_date=c_init,
+                    ens=c_ens,
+                    plot_dir=plot_dir,
+                    basin_cumulative_ace=basin_cumulative_ace,
+                )
+                
+                # Make sure the diagnostics dict values are np.asarray for ensmean consistency
+                np_diagnostics = {}
+                for b_name, b_data in c_diag.items():
+                    np_diagnostics[b_name] = {k: np.asarray(v) for k, v in b_data.items()}
+                
+                all_member_results.append((ens_member, c_lats, c_lons, c_times, c_local_ace, np_diagnostics, c_vort))
+                processed_count += 1
+                print(f"[Cache] Completed member '{ens_member}' using cached diagnostics.")
+                continue
+            except Exception as e:
+                print(f"[Cache Warning] Failed to read existing cache '{member_cache_path.name}': {e}. Reverting to raw data processing.")
 
         sfc_files = discover_collection_files(sfc_root, args.init_date, ens_member, args.sfc_collection)
         atm_files = discover_collection_files(atm_root, args.init_date, ens_member, args.atm_collection)
@@ -1233,6 +1268,13 @@ def main(argv: list[str] | None = None) -> int:
                 basin_cumulative_ace=basin_cumulative_ace,
             )
 
+            # Convert diagnostics to np.asarray values for consistency with c_diag loaded from NetCDF
+            np_diagnostics = {}
+            for b_name, b_data in diagnostics.items():
+                np_diagnostics[b_name] = {k: np.asarray(v) for k, v in b_data.items()}
+
+            all_member_results.append((ens_member, latitudes, longitudes, valid_times, local_ace, np_diagnostics, uses_vorticity))
+
             print("=" * 80)
             print(f"Wrote cache: {output_path}")
             for basin_name in BASINS:
@@ -1252,6 +1294,76 @@ def main(argv: list[str] | None = None) -> int:
     if processed_count == 0:
         print("ERROR: No ensemble members were successfully processed.", file=sys.stderr)
         return 1
+
+    # 4. Generate Ensemble Mean (ensmean) Diagnostics and Plots
+    print("\n" + "=" * 80)
+    print("GENERATING ENSEMBLE MEAN (ENSMEAN) DIAGNOSTICS")
+    print(f"Aggregating {len(all_member_results)} successful ensemble member(s)...")
+    print("=" * 80)
+
+    # Use first successful member's grids as reference
+    ref_member, ref_lats, ref_lons, ref_times, _, _, ref_vort = all_member_results[0]
+    
+    # Average 2D spatial local ACE
+    mean_local_ace = np.mean([res[4] for res in all_member_results], axis=0)
+    
+    # Average integrated diagnostic curves
+    mean_diagnostics: dict[str, dict[str, np.ndarray]] = {}
+    for basin_name in BASINS:
+        mean_diagnostics[basin_name] = {}
+        ref_basin = all_member_results[0][5][basin_name]
+        for field_name in ref_basin.keys():
+            field_arrays = []
+            for res in all_member_results:
+                member_val = res[5][basin_name].get(field_name)
+                if member_val is not None:
+                    field_arrays.append(np.asarray(member_val))
+            
+            if field_arrays:
+                min_len = min(arr.shape[0] for arr in field_arrays)
+                aligned_arrays = [arr[:min_len] for arr in field_arrays]
+                with np.errstate(all="ignore"):
+                    mean_field = np.nanmean(aligned_arrays, axis=0)
+                mean_diagnostics[basin_name][field_name] = mean_field
+            else:
+                mean_diagnostics[basin_name][field_name] = np.zeros(len(ref_times))
+
+    any_uses_vorticity = any(res[6] for res in all_member_results)
+    
+    ensmean_cache_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_ensmean.nc4"
+    write_cache(
+        ensmean_cache_path,
+        args.init_date,
+        "ensmean",
+        ref_lats,
+        ref_lons,
+        ref_times,
+        mean_local_ace,
+        mean_diagnostics,
+        any_uses_vorticity,
+    )
+    
+    # Load cumulative curves to plot
+    basin_cumulative_ace = {name: mean_diagnostics[name]["cumulative_ace"] for name in BASINS}
+    plot_ace_diagnostics(
+        local_ace=mean_local_ace,
+        cumulative_ace_time=basin_cumulative_ace["North Atlantic"],
+        time_dates=ref_times,
+        latitudes=ref_lats,
+        longitudes=ref_lons,
+        init_date=args.init_date,
+        ens="ensmean",
+        plot_dir=plot_dir,
+        basin_cumulative_ace=basin_cumulative_ace,
+    )
+
+    print("=" * 80)
+    print(f"Wrote ensemble mean cache: {ensmean_cache_path}")
+    for basin_name in BASINS:
+        total_ace = mean_diagnostics[basin_name]["cumulative_ace"][-1]
+        strike_prob_sum = float(np.sum(mean_diagnostics[basin_name]["tc_flag"]))
+        print(f"{basin_name:18s} mean_total_ace={total_ace:8.2f}  mean_tc_hits={strike_prob_sum:8.2f}")
+    print("=" * 80)
 
     return 0
 
