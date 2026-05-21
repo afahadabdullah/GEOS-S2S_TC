@@ -495,6 +495,7 @@ def write_cache(
     local_ace: np.ndarray,
     diagnostics: dict[str, dict[str, list[float]]],
     uses_vorticity: bool,
+    local_ace_monthly: dict[str, np.ndarray] | None = None,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     init_dt = datetime.strptime(init_date, "%Y%m%d")
@@ -526,6 +527,14 @@ def write_cache(
         ace_spatial_var.units = "10^4 kt^2"
         ace_spatial_var.long_name = "Local Accumulated Cyclone Energy spatial field"
         ace_spatial_var[:] = local_ace
+
+        # Save monthly local ACE fields if provided
+        if local_ace_monthly is not None:
+            for month_str, monthly_ace in local_ace_monthly.items():
+                monthly_var = ds.createVariable(f"local_ace_{month_str}", "f4", ("lat", "lon"), zlib=True, complevel=4)
+                monthly_var.units = "10^4 kt^2"
+                monthly_var.long_name = f"Local Accumulated Cyclone Energy spatial field for month {month_str}"
+                monthly_var[:] = monthly_ace
 
         # Backward compatible integrated curves variable (North Atlantic)
         ace_time_var = ds.createVariable("cumulative_ace", "f4", ("time",), zlib=True, complevel=4)
@@ -574,8 +583,9 @@ def write_cache(
         )
 
 
-def read_cache(cache_path: Path) -> tuple[str, str, np.ndarray, np.ndarray, list[datetime], np.ndarray, dict[str, dict[str, np.ndarray]], bool]:
+def read_cache(cache_path: Path) -> tuple[str, str, np.ndarray, np.ndarray, list[datetime], np.ndarray, dict[str, dict[str, np.ndarray]], bool, dict[str, np.ndarray]]:
     diagnostics: dict[str, dict[str, np.ndarray]] = {}
+    local_ace_monthly: dict[str, np.ndarray] = {}
     with netCDF4.Dataset(cache_path, "r") as ds:
         init_date = str(getattr(ds, "source_initialization"))
         ens = str(getattr(ds, "source_ensemble"))
@@ -588,6 +598,12 @@ def read_cache(cache_path: Path) -> tuple[str, str, np.ndarray, np.ndarray, list
         times = [to_datetime(value) for value in netCDF4.num2date(time_var[:], time_var.units)]
         
         local_ace = np.asarray(ds.variables["local_ace"][:], dtype="float64")
+
+        # Load monthly local ACE fields if they exist
+        for var_name in ds.variables:
+            if var_name.startswith("local_ace_"):
+                month_str = var_name.split("_")[-1]
+                local_ace_monthly[month_str] = np.asarray(ds.variables[var_name][:], dtype="float64")
 
         for basin_name in BASINS:
             basin_key = safe_name(basin_name)
@@ -608,7 +624,7 @@ def read_cache(cache_path: Path) -> tuple[str, str, np.ndarray, np.ndarray, list
                 var_name = f"{field_name}_{basin_key}"
                 diagnostics[basin_name][field_name] = np.asarray(ds.variables[var_name][:])
 
-    return init_date, ens, latitudes, longitudes, times, local_ace, diagnostics, uses_vorticity
+    return init_date, ens, latitudes, longitudes, times, local_ace, diagnostics, uses_vorticity, local_ace_monthly
 
 
 def plot_ace_diagnostics(
@@ -621,12 +637,14 @@ def plot_ace_diagnostics(
     ens: str,
     plot_dir: Path,
     basin_cumulative_ace: dict[str, np.ndarray] | None = None,
+    local_ace_monthly: dict[str, np.ndarray] | None = None,
 ) -> None:
     """Generate and save premium, publication-quality diagnostic plots.
 
     1. A spatial Mercator projection map showing local TC-conditioned ACE tracks (NATL).
     2. A temporal line chart showing accumulation curves.
     3. A global Pacific-centered map showing all basins and integrated ACE.
+    4. A two-panel plot showing Month 1 (October) and Month 2 (November) forecast.
     """
     plot_dir.mkdir(parents=True, exist_ok=True)
     print("Generating unified diagnostic plots...")
@@ -845,6 +863,114 @@ def plot_ace_diagnostics(
     plt.close()
     print(f"  -> Saved global multi-basin map to: {global_plot_path}\n")
 
+    # --------------------------------------------------------------------------
+    # PLOT 4: TWO-PANEL MONTHLY COMPARISON (OCTOBER & NOVEMBER)
+    # --------------------------------------------------------------------------
+    if local_ace_monthly:
+        print("Generating monthly comparison plots...")
+        ace_oct = local_ace_monthly.get("10", np.zeros_like(local_ace))
+        ace_nov = local_ace_monthly.get("11", np.zeros_like(local_ace))
+
+        ace_plot_oct = ace_oct[:, sorted_idx]
+        ace_plot_nov = ace_nov[:, sorted_idx]
+
+        fig4 = plt.figure(figsize=(16, 8), dpi=300)
+        
+        max_ace_val = max(np.max(ace_oct), np.max(ace_nov))
+        if max_ace_val < 0.005:
+            max_ace_val = 5.0
+        levels = np.linspace(0.005, max_ace_val * 1.05, 100)
+
+        # October Panel
+        if HAS_CARTOPY:
+            proj = ccrs.Mercator(central_longitude=-55.0, min_latitude=0.0, max_latitude=45.0)
+            ax_oct = fig4.add_subplot(1, 2, 1, projection=proj)
+            ax_oct.set_extent([-98.0, -15.0, 5.0, 42.0], crs=ccrs.PlateCarree())
+            ax_oct.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)
+            
+            contour_oct = ax_oct.contourf(
+                lons_plot, latitudes, ace_plot_oct,
+                levels=levels,
+                transform=ccrs.PlateCarree(),
+                cmap=ace_cmap,
+                zorder=1,
+                alpha=0.9
+            )
+            ax_oct.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=2)
+            ax_oct.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.6, zorder=3)
+            ax_oct.add_feature(cfeature.BORDERS, edgecolor="#bbbbbb", linewidth=0.4, linestyle=":", zorder=3)
+            
+            gl_o = ax_oct.gridlines(draw_labels=True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--", zorder=4)
+            gl_o.top_labels = False
+            gl_o.right_labels = False
+            gl_o.xlabel_style = {"size": 8, "color": "#555555"}
+            gl_o.ylabel_style = {"size": 8, "color": "#555555"}
+        else:
+            ax_oct = fig4.add_subplot(1, 2, 1)
+            ax_oct.set_facecolor("#daeefb")
+            contour_oct = ax_oct.contourf(longitudes, latitudes, ace_oct, levels=levels, cmap=ace_cmap)
+            ax_oct.set_xlim([-98.0, -15.0])
+            ax_oct.set_ylim([5.0, 42.0])
+            ax_oct.set_xlabel("Longitude")
+            ax_oct.set_ylabel("Latitude")
+            ax_oct.grid(True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--")
+
+        ax_oct.set_title("October - Month 1 Forecast", fontsize=11, fontweight="bold", pad=10, color="#1e222a")
+
+        # November Panel
+        if HAS_CARTOPY:
+            ax_nov = fig4.add_subplot(1, 2, 2, projection=proj)
+            ax_nov.set_extent([-98.0, -15.0, 5.0, 42.0], crs=ccrs.PlateCarree())
+            ax_nov.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)
+            
+            contour_nov = ax_nov.contourf(
+                lons_plot, latitudes, ace_plot_nov,
+                levels=levels,
+                transform=ccrs.PlateCarree(),
+                cmap=ace_cmap,
+                zorder=1,
+                alpha=0.9
+            )
+            ax_nov.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=2)
+            ax_nov.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.6, zorder=3)
+            ax_nov.add_feature(cfeature.BORDERS, edgecolor="#bbbbbb", linewidth=0.4, linestyle=":", zorder=3)
+            
+            gl_n = ax_nov.gridlines(draw_labels=True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--", zorder=4)
+            gl_n.top_labels = False
+            gl_n.right_labels = False
+            gl_n.xlabel_style = {"size": 8, "color": "#555555"}
+            gl_n.ylabel_style = {"size": 8, "color": "#555555"}
+        else:
+            ax_nov = fig4.add_subplot(1, 2, 2)
+            ax_nov.set_facecolor("#daeefb")
+            contour_nov = ax_nov.contourf(longitudes, latitudes, ace_nov, levels=levels, cmap=ace_cmap)
+            ax_nov.set_xlim([-98.0, -15.0])
+            ax_nov.set_ylim([5.0, 42.0])
+            ax_nov.set_xlabel("Longitude")
+            ax_nov.set_ylabel("Latitude")
+            ax_nov.grid(True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--")
+
+        ax_nov.set_title("November - Month 2 Forecast", fontsize=11, fontweight="bold", pad=10, color="#1e222a")
+
+        # Shared colorbar at the bottom
+        cbar_ax = fig4.add_axes([0.25, 0.08, 0.5, 0.03])
+        cbar4 = fig4.colorbar(contour_oct, cax=cbar_ax, orientation="horizontal")
+        cbar4.set_label("TC-Conditioned Spatial ACE Index (10$^4$ kt$^2$)", fontsize=9, color="#333333", fontweight="bold", labelpad=6)
+        cbar4.ax.tick_params(labelsize=8, color="#555555", labelcolor="#333333")
+        cbar4.outline.set_visible(False)
+
+        # Super title
+        fig4.suptitle(
+            f"GEOS S2S3 TC-Conditioned Local ACE Monthly Comparison (North Atlantic)\n"
+            f"Initialization: {init_date}  |  Member: {ens}",
+            fontsize=13, fontweight="bold", y=0.96, color="#1e222a"
+        )
+        
+        monthly_plot_path = plot_dir / f"monthly_local_ace_comparison_{init_date}_{ens}.png"
+        plt.savefig(monthly_plot_path, bbox_inches="tight", dpi=300)
+        plt.close()
+        print(f"  -> Saved monthly comparison map to: {monthly_plot_path}")
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -914,7 +1040,7 @@ def main(argv: list[str] | None = None) -> int:
     plot_dir = Path(args.plot_dir)
     
     if args.plot_only_cache:
-        init_date, ens, latitudes, longitudes, times, local_ace, diagnostics, uses_vorticity = read_cache(Path(args.plot_only_cache))
+        init_date, ens, latitudes, longitudes, times, local_ace, diagnostics, uses_vorticity, local_ace_monthly = read_cache(Path(args.plot_only_cache))
         basin_cumulative_ace = {basin_name: data["cumulative_ace"] for basin_name, data in diagnostics.items()}
         plot_ace_diagnostics(
             local_ace=local_ace,
@@ -926,6 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
             ens=ens,
             plot_dir=plot_dir,
             basin_cumulative_ace=basin_cumulative_ace,
+            local_ace_monthly=local_ace_monthly,
         )
         return 0
 
@@ -969,7 +1096,7 @@ def main(argv: list[str] | None = None) -> int:
         if member_cache_path.is_file():
             print(f"[Cache] Found existing cache for '{ens_member}': {member_cache_path.name}")
             try:
-                c_init, c_ens, c_lats, c_lons, c_times, c_local_ace, c_diag, c_vort = read_cache(member_cache_path)
+                c_init, c_ens, c_lats, c_lons, c_times, c_local_ace, c_diag, c_vort, c_monthly = read_cache(member_cache_path)
                 if args.plot_individual:
                     print(f"[Cache] Successfully loaded cached diagnostics. Regenerating plots to ensure completeness...")
                     # Regenerate plots in case styling updated
@@ -984,6 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
                         ens=c_ens,
                         plot_dir=plot_dir,
                         basin_cumulative_ace=basin_cumulative_ace,
+                        local_ace_monthly=c_monthly,
                     )
                 else:
                     print(f"[Cache] Successfully loaded cached diagnostics for '{ens_member}'. Skipping individual plots.")
@@ -993,7 +1121,7 @@ def main(argv: list[str] | None = None) -> int:
                 for b_name, b_data in c_diag.items():
                     np_diagnostics[b_name] = {k: np.asarray(v) for k, v in b_data.items()}
                 
-                all_member_results.append((ens_member, c_lats, c_lons, c_times, c_local_ace, np_diagnostics, c_vort))
+                all_member_results.append((ens_member, c_lats, c_lons, c_times, c_local_ace, np_diagnostics, c_vort, c_monthly))
                 processed_count += 1
                 print(f"[Cache] Completed member '{ens_member}' using cached diagnostics.")
                 continue
@@ -1036,6 +1164,10 @@ def main(argv: list[str] | None = None) -> int:
             # Initialize 2D spatial local ACE field
             nlat_g, nlon_g = len(latitudes), len(longitudes)
             local_ace = np.zeros((nlat_g, nlon_g), dtype="float64")
+            local_ace_monthly = {
+                m: np.zeros((nlat_g, nlon_g), dtype="float64")
+                for m in forecast_months
+            }
 
             diagnostics: dict[str, dict[str, list[float]]] = {
                 basin_name: {
@@ -1225,6 +1357,23 @@ def main(argv: list[str] | None = None) -> int:
                                     scale_step=scale_step,
                                 )
                                 
+                                # Also accumulate into monthly field
+                                current_month = valid_time.strftime("%m")
+                                if current_month in local_ace_monthly:
+                                    _ = accumulate_storm_ace(
+                                        local_ace=local_ace_monthly[current_month],
+                                        sfc_ws_kt=sfc_ws_kt,
+                                        latitudes=latitudes,
+                                        longitudes=longitudes,
+                                        center_lat_idx=center_lat_idx,
+                                        center_lon_idx=center_lon_idx,
+                                        lat_radius=lat_wind_radius,
+                                        lon_radius=lon_wind_radius,
+                                        search_radius_deg=args.wind_search_radius_deg,
+                                        ts_threshold_knots=args.ts_threshold,
+                                        scale_step=scale_step,
+                                    )
+                                
                                 # Increment integrated temporal curves using vmax within storm radius
                                 if np.isfinite(vmax_kt) and vmax_kt >= args.ts_threshold:
                                     step_ace = float(vmax_kt**2 * scale_step)
@@ -1259,7 +1408,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
             output_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_{ens_member}.nc4"
-            write_cache(output_path, args.init_date, ens_member, latitudes, longitudes, valid_times, local_ace, diagnostics, uses_vorticity)
+            write_cache(output_path, args.init_date, ens_member, latitudes, longitudes, valid_times, local_ace, diagnostics, uses_vorticity, local_ace_monthly)
             
             # Load curves to plot
             basin_cumulative_ace = {name: np.array(data["cumulative_ace"]) for name, data in diagnostics.items()}
@@ -1274,6 +1423,7 @@ def main(argv: list[str] | None = None) -> int:
                     ens=ens_member,
                     plot_dir=plot_dir,
                     basin_cumulative_ace=basin_cumulative_ace,
+                    local_ace_monthly=local_ace_monthly,
                 )
 
             # Convert diagnostics to np.asarray values for consistency with c_diag loaded from NetCDF
@@ -1281,7 +1431,7 @@ def main(argv: list[str] | None = None) -> int:
             for b_name, b_data in diagnostics.items():
                 np_diagnostics[b_name] = {k: np.asarray(v) for k, v in b_data.items()}
 
-            all_member_results.append((ens_member, latitudes, longitudes, valid_times, local_ace, np_diagnostics, uses_vorticity))
+            all_member_results.append((ens_member, latitudes, longitudes, valid_times, local_ace, np_diagnostics, uses_vorticity, local_ace_monthly))
 
             print("=" * 80)
             print(f"Wrote cache: {output_path}")
@@ -1309,12 +1459,21 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Aggregating {len(all_member_results)} successful ensemble member(s)...")
     print("=" * 80)
 
-    # Use first successful member's grids as reference
-    ref_member, ref_lats, ref_lons, ref_times, _, _, ref_vort = all_member_results[0]
+    # Use first successful member's grids as reference (unpack first 7 values)
+    ref_member, ref_lats, ref_lons, ref_times, _, _, ref_vort = all_member_results[0][:7]
     
     # Average 2D spatial local ACE
     mean_local_ace = np.mean([res[4] for res in all_member_results], axis=0)
     
+    # Average monthly 2D spatial local ACE
+    mean_local_ace_monthly = {}
+    all_months = set()
+    for res in all_member_results:
+        if len(res) > 7 and res[7]:
+            all_months.update(res[7].keys())
+    for m in all_months:
+        mean_local_ace_monthly[m] = np.mean([res[7][m] for res in all_member_results if m in res[7]], axis=0)
+
     # Average integrated diagnostic curves
     mean_diagnostics: dict[str, dict[str, np.ndarray]] = {}
     for basin_name in BASINS:
@@ -1349,6 +1508,7 @@ def main(argv: list[str] | None = None) -> int:
         mean_local_ace,
         mean_diagnostics,
         any_uses_vorticity,
+        mean_local_ace_monthly,
     )
     
     # Load cumulative curves to plot
@@ -1363,6 +1523,7 @@ def main(argv: list[str] | None = None) -> int:
         ens="ensmean",
         plot_dir=plot_dir,
         basin_cumulative_ace=basin_cumulative_ace,
+        local_ace_monthly=mean_local_ace_monthly,
     )
 
     print("=" * 80)
