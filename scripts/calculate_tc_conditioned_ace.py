@@ -644,7 +644,7 @@ def plot_ace_diagnostics(
     1. A spatial Mercator projection map showing local TC-conditioned ACE tracks (NATL).
     2. A temporal line chart showing accumulation curves.
     3. A global Pacific-centered map showing all basins and integrated ACE.
-    4. A two-panel plot showing Month 1 (October) and Month 2 (November) forecast.
+    4. A two-panel plot showing Month 1 (September) and Month 2 (October) forecast.
     """
     plot_dir.mkdir(parents=True, exist_ok=True)
     print("Generating unified diagnostic plots...")
@@ -864,27 +864,62 @@ def plot_ace_diagnostics(
     print(f"  -> Saved global multi-basin map to: {global_plot_path}\n")
 
     # --------------------------------------------------------------------------
-    # PLOT 4: TWO-PANEL MONTHLY COMPARISON (OCTOBER & NOVEMBER)
+    # PLOT 4: TWO-PANEL MONTHLY COMPARISON (SEPTEMBER & OCTOBER)
     # --------------------------------------------------------------------------
     if local_ace_monthly:
         print("Generating monthly comparison plots...")
+        ace_sep = local_ace_monthly.get("09", np.zeros_like(local_ace))
         ace_oct = local_ace_monthly.get("10", np.zeros_like(local_ace))
-        ace_nov = local_ace_monthly.get("11", np.zeros_like(local_ace))
 
+        ace_plot_sep = ace_sep[:, sorted_idx]
         ace_plot_oct = ace_oct[:, sorted_idx]
-        ace_plot_nov = ace_nov[:, sorted_idx]
 
         fig4 = plt.figure(figsize=(16, 8), dpi=300)
         
-        max_ace_val = max(np.max(ace_oct), np.max(ace_nov))
+        max_ace_val = max(np.max(ace_sep), np.max(ace_oct))
         if max_ace_val < 0.005:
             max_ace_val = 5.0
         levels = np.linspace(0.005, max_ace_val * 1.05, 100)
 
-        # October Panel
+        # September Panel
         if HAS_CARTOPY:
             proj = ccrs.Mercator(central_longitude=-55.0, min_latitude=0.0, max_latitude=45.0)
-            ax_oct = fig4.add_subplot(1, 2, 1, projection=proj)
+            ax_sep = fig4.add_subplot(1, 2, 1, projection=proj)
+            ax_sep.set_extent([-98.0, -15.0, 5.0, 42.0], crs=ccrs.PlateCarree())
+            ax_sep.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)
+            
+            contour_sep = ax_sep.contourf(
+                lons_plot, latitudes, ace_plot_sep,
+                levels=levels,
+                transform=ccrs.PlateCarree(),
+                cmap=ace_cmap,
+                zorder=1,
+                alpha=0.9
+            )
+            ax_sep.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=2)
+            ax_sep.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.6, zorder=3)
+            ax_sep.add_feature(cfeature.BORDERS, edgecolor="#bbbbbb", linewidth=0.4, linestyle=":", zorder=3)
+            
+            gl_s = ax_sep.gridlines(draw_labels=True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--", zorder=4)
+            gl_s.top_labels = False
+            gl_s.right_labels = False
+            gl_s.xlabel_style = {"size": 8, "color": "#555555"}
+            gl_s.ylabel_style = {"size": 8, "color": "#555555"}
+        else:
+            ax_sep = fig4.add_subplot(1, 2, 1)
+            ax_sep.set_facecolor("#daeefb")
+            contour_sep = ax_sep.contourf(longitudes, latitudes, ace_sep, levels=levels, cmap=ace_cmap)
+            ax_sep.set_xlim([-98.0, -15.0])
+            ax_sep.set_ylim([5.0, 42.0])
+            ax_sep.set_xlabel("Longitude")
+            ax_sep.set_ylabel("Latitude")
+            ax_sep.grid(True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--")
+
+        ax_sep.set_title("September - Month 1 Forecast", fontsize=11, fontweight="bold", pad=10, color="#1e222a")
+
+        # October Panel
+        if HAS_CARTOPY:
+            ax_oct = fig4.add_subplot(1, 2, 2, projection=proj)
             ax_oct.set_extent([-98.0, -15.0, 5.0, 42.0], crs=ccrs.PlateCarree())
             ax_oct.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)
             
@@ -906,7 +941,7 @@ def plot_ace_diagnostics(
             gl_o.xlabel_style = {"size": 8, "color": "#555555"}
             gl_o.ylabel_style = {"size": 8, "color": "#555555"}
         else:
-            ax_oct = fig4.add_subplot(1, 2, 1)
+            ax_oct = fig4.add_subplot(1, 2, 2)
             ax_oct.set_facecolor("#daeefb")
             contour_oct = ax_oct.contourf(longitudes, latitudes, ace_oct, levels=levels, cmap=ace_cmap)
             ax_oct.set_xlim([-98.0, -15.0])
@@ -915,46 +950,11 @@ def plot_ace_diagnostics(
             ax_oct.set_ylabel("Latitude")
             ax_oct.grid(True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--")
 
-        ax_oct.set_title("October - Month 1 Forecast", fontsize=11, fontweight="bold", pad=10, color="#1e222a")
-
-        # November Panel
-        if HAS_CARTOPY:
-            ax_nov = fig4.add_subplot(1, 2, 2, projection=proj)
-            ax_nov.set_extent([-98.0, -15.0, 5.0, 42.0], crs=ccrs.PlateCarree())
-            ax_nov.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)
-            
-            contour_nov = ax_nov.contourf(
-                lons_plot, latitudes, ace_plot_nov,
-                levels=levels,
-                transform=ccrs.PlateCarree(),
-                cmap=ace_cmap,
-                zorder=1,
-                alpha=0.9
-            )
-            ax_nov.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=2)
-            ax_nov.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.6, zorder=3)
-            ax_nov.add_feature(cfeature.BORDERS, edgecolor="#bbbbbb", linewidth=0.4, linestyle=":", zorder=3)
-            
-            gl_n = ax_nov.gridlines(draw_labels=True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--", zorder=4)
-            gl_n.top_labels = False
-            gl_n.right_labels = False
-            gl_n.xlabel_style = {"size": 8, "color": "#555555"}
-            gl_n.ylabel_style = {"size": 8, "color": "#555555"}
-        else:
-            ax_nov = fig4.add_subplot(1, 2, 2)
-            ax_nov.set_facecolor("#daeefb")
-            contour_nov = ax_nov.contourf(longitudes, latitudes, ace_nov, levels=levels, cmap=ace_cmap)
-            ax_nov.set_xlim([-98.0, -15.0])
-            ax_nov.set_ylim([5.0, 42.0])
-            ax_nov.set_xlabel("Longitude")
-            ax_nov.set_ylabel("Latitude")
-            ax_nov.grid(True, linewidth=0.3, color="#aaaaaa", alpha=0.4, linestyle="--")
-
-        ax_nov.set_title("November - Month 2 Forecast", fontsize=11, fontweight="bold", pad=10, color="#1e222a")
+        ax_oct.set_title("October - Month 2 Forecast", fontsize=11, fontweight="bold", pad=10, color="#1e222a")
 
         # Shared colorbar at the bottom
         cbar_ax = fig4.add_axes([0.25, 0.08, 0.5, 0.03])
-        cbar4 = fig4.colorbar(contour_oct, cax=cbar_ax, orientation="horizontal")
+        cbar4 = fig4.colorbar(contour_sep, cax=cbar_ax, orientation="horizontal")
         cbar4.set_label("TC-Conditioned Spatial ACE Index (10$^4$ kt$^2$)", fontsize=9, color="#333333", fontweight="bold", labelpad=6)
         cbar4.ax.tick_params(labelsize=8, color="#555555", labelcolor="#333333")
         cbar4.outline.set_visible(False)
@@ -984,7 +984,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--sfc-collection", default=DEFAULT_SFC_COLLECTION)
     parser.add_argument("--atm-collection", default=DEFAULT_ATM_COLLECTION)
-    parser.add_argument("--months", default="09,10,11", help="Forecast months to use, separated by commas")
+    parser.add_argument("--months", default="09,10", help="Forecast months to use, separated by commas")
     parser.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR)
     parser.add_argument("--plot-dir", default=DEFAULT_PLOT_DIR)
     parser.add_argument(
