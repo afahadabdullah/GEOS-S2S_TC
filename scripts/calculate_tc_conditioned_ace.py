@@ -158,6 +158,14 @@ def find_first_variable(dataset, candidates: tuple[str, ...]) -> str | None:
     return None
 
 
+def find_sfc_wind_var_names(dataset) -> tuple[str, str] | None:
+    u_var_name = find_first_variable(dataset, US_CANDIDATES)
+    v_var_name = find_first_variable(dataset, VS_CANDIDATES)
+    if u_var_name is None or v_var_name is None:
+        return None
+    return u_var_name, v_var_name
+
+
 def coord_values_hpa(var) -> list[float] | None:
     try:
         values = np.asarray(var[:], dtype="float64").reshape(-1)
@@ -366,6 +374,9 @@ class SFCIndex:
         self.longitudes: np.ndarray | None = None
         self._cached_path: Path | None = None
         self._cached_ds = None
+        self.indexed_files = 0
+        self.skipped_no_wind_files = 0
+        self.skipped_no_wind_examples: list[str] = []
 
         for path in sfc_files:
             yyyymm = forecast_yyyymm(path.name, collection)
@@ -373,6 +384,12 @@ class SFCIndex:
                 continue
 
             with netCDF4.Dataset(path, "r") as ds:
+                if find_sfc_wind_var_names(ds) is None:
+                    self.skipped_no_wind_files += 1
+                    if len(self.skipped_no_wind_examples) < 5:
+                        self.skipped_no_wind_examples.append(path.name)
+                    continue
+
                 if self.latitudes is None:
                     self.latitudes = np.asarray(ds.variables["lat"][:], dtype="float64")
                     self.longitudes = np.asarray(ds.variables["lon"][:], dtype="float64")
@@ -381,10 +398,14 @@ class SFCIndex:
                 dates = netCDF4.num2date(time_values, time_units)
                 for index, date_value in enumerate(dates):
                     self.entries.append(SFCMatch(valid_time=to_datetime(date_value), file_path=path, time_index=index))
+                self.indexed_files += 1
 
         self.entries.sort(key=lambda item: item.valid_time)
         if self.latitudes is None or self.longitudes is None:
-            raise ValueError("No SFC files were indexed")
+            raise ValueError(
+                "No wind-bearing SFC files were indexed. "
+                f"Skipped {self.skipped_no_wind_files} files without one of {US_CANDIDATES}/{VS_CANDIDATES}."
+            )
 
     def close(self) -> None:
         if self._cached_ds is not None:
@@ -411,8 +432,14 @@ class SFCIndex:
             self._cached_ds = netCDF4.Dataset(match.file_path, "r")
             self._cached_path = match.file_path
 
-        u_var_name = find_first_variable(self._cached_ds, US_CANDIDATES) or "US"
-        v_var_name = find_first_variable(self._cached_ds, VS_CANDIDATES) or "VS"
+        wind_names = find_sfc_wind_var_names(self._cached_ds)
+        if wind_names is None:
+            available = ", ".join(list(self._cached_ds.variables)[:30])
+            raise KeyError(
+                f"SFC file {match.file_path} does not contain a recognized wind pair "
+                f"{US_CANDIDATES}/{VS_CANDIDATES}. Available variables start with: {available}"
+            )
+        u_var_name, v_var_name = wind_names
         us = np.asarray(self._cached_ds.variables[u_var_name][match.time_index, :, :], dtype="float64")
         vs = np.asarray(self._cached_ds.variables[v_var_name][match.time_index, :, :], dtype="float64")
         return us, vs

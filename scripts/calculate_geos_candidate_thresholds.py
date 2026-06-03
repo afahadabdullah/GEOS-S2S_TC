@@ -301,6 +301,13 @@ def collect_candidates_for_member(
         print(f"WARNING: failed to index SFC for {init_date} {ens}: {exc}; skipping")
         return
 
+    if getattr(sfc_index, "skipped_no_wind_files", 0):
+        examples = ", ".join(getattr(sfc_index, "skipped_no_wind_examples", []))
+        print(
+            f"WARNING: skipped {sfc_index.skipped_no_wind_files} SFC files without recognized wind variables "
+            f"for {init_date} {ens}. Examples: {examples}"
+        )
+
     try:
         latitudes = sfc_index.latitudes
         longitudes = sfc_index.longitudes
@@ -355,7 +362,13 @@ def collect_candidates_for_member(
                             continue
                         sfc_delta_hours = abs((sfc_match.valid_time - valid_time).total_seconds()) / 3600.0
 
-                        us_sfc, vs_sfc = sfc_index.load_wind(sfc_match)
+                        try:
+                            us_sfc, vs_sfc = sfc_index.load_wind(sfc_match)
+                        except Exception as exc:
+                            print(f"WARNING: could not load SFC wind for {sfc_match.file_path}: {exc}; skipping time")
+                            for basin_name in BASINS:
+                                basin_stats[basin_name]["missing_sfc_wind"] += 1
+                            continue
                         sfc_ws_kt = np.sqrt(us_sfc**2 + vs_sfc**2) * MPS_TO_KNOTS
 
                         slp_hpa = slp_to_hpa(
@@ -513,6 +526,7 @@ def write_thresholds(
         "accepted_candidates",
         "rejected_structure",
         "missing_sfc_match",
+        "missing_sfc_wind",
         "init_dates",
         "ensembles",
         "months",
@@ -562,6 +576,7 @@ def write_thresholds(
                         "accepted_candidates": basin_stats[basin_name]["accepted_candidates"],
                         "rejected_structure": basin_stats[basin_name]["rejected_structure"],
                         "missing_sfc_match": basin_stats[basin_name]["missing_sfc_match"],
+                        "missing_sfc_wind": basin_stats[basin_name]["missing_sfc_wind"],
                         "init_dates": init_dates_text,
                         "ensembles": ensembles_text,
                         "months": months_text,
