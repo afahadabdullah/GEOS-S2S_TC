@@ -3,10 +3,15 @@
 
 This script is the GEOS-side companion to
 ``calculate_ibtracs_observed_percentiles.py``. It collects model candidate
-intensities only after the same TC-like structure gate used by
+intensities only after a TC-like structure gate based on
 ``calculate_tc_conditioned_ace.py``:
 
     SLP minimum + warm-core anomaly + QV850 anomaly + optional vorticity sign
+
+Unlike the original single-center ACE workflow, this calibration inventory can
+write multiple local SLP minima per basin/time. That lets the cached candidate
+inventory represent simultaneous TCs in active basins such as the western North
+Pacific.
 
 For each basin, the script then maps the observed IBTrACS percentile of 34 kt
 onto the GEOS candidate-centered Vmax distribution:
@@ -71,6 +76,7 @@ from calculate_tc_conditioned_ace import (
     V_CANDIDATES,
     annulus_mean,
     basin_candidate_center,
+    basin_lon_sets,
     basin_has_coverage,
     detect_vertical_dim,
     discover_collection_files,
@@ -112,6 +118,10 @@ class CandidateRow:
     qv850_anom_gpkg: float
     vort850_s1: float
     used_vorticity: int
+
+
+def normalize_lon(lon: float) -> float:
+    return ((lon + 180.0) % 360.0) - 180.0
 
 
 def parse_list(value: str | None) -> list[str]:
@@ -206,6 +216,104 @@ def finite_percentile(values: list[float], percentile: float) -> float:
         return float("nan")
     percentile = min(100.0, max(0.0, percentile))
     return float(np.nanpercentile(array, percentile))
+
+
+def lon_lat_distance_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    dlat = lat1 - lat2
+    dlon = abs(normalize_lon(lon1 - lon2))
+    mean_lat = math.radians(0.5 * (lat1 + lat2))
+    return math.sqrt(dlat * dlat + (dlon * math.cos(mean_lat)) ** 2)
+
+
+def is_too_close_to_accepted(
+    lat_idx: int,
+    lon_idx: int,
+    accepted_centers: list[tuple[int, int]],
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+    min_separation_deg: float,
+) -> bool:
+    if min_separation_deg <= 0.0:
+        return False
+    lat = float(latitudes[lat_idx])
+    lon = normalize_lon(float(longitudes[lon_idx]))
+    for accepted_lat_idx, accepted_lon_idx in accepted_centers:
+        accepted_lat = float(latitudes[accepted_lat_idx])
+        accepted_lon = normalize_lon(float(longitudes[accepted_lon_idx]))
+        if lon_lat_distance_deg(lat, lon, accepted_lat, accepted_lon) < min_separation_deg:
+            return True
+    return False
+
+
+def is_local_minimum(field: np.ndarray, lat_idx: int, lon_idx: int, lat_radius: int, lon_radius: int) -> bool:
+    value = float(field[lat_idx, lon_idx])
+    if not np.isfinite(value):
+        return False
+    nlat, nlon = field.shape
+    lat_lo = max(0, lat_idx - lat_radius)
+    lat_hi = min(nlat, lat_idx + lat_radius + 1)
+    lon_offsets = np.arange(-lon_radius, lon_radius + 1)
+    lon_indices = (lon_idx + lon_offsets) % nlon
+    patch = field[np.ix_(np.arange(lat_lo, lat_hi), lon_indices)]
+    if not np.isfinite(patch).any():
+        return False
+    return value <= float(np.nanmin(patch)) + 1.0e-8 and value < float(np.nanmean(patch)) - 1.0e-8
+
+
+def basin_low_slp_local_minima(
+    field: np.ndarray,
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+    basin_def: dict[str, object],
+    max_search_points: int,
+    local_min_lat_radius: int,
+    local_min_lon_radius: int,
+) -> list[tuple[int, int, float]]:
+    lat_min, lat_max = basin_def["lat_range"]
+    lat_idx = np.where((latitudes >= lat_min) & (latitudes <= lat_max))[0]
+    if len(lat_idx) == 0:
+        raise ValueError("No latitude points found for basin")
+
+    point_lat_indices: list[np.ndarray] = []
+    point_lon_indices: list[np.ndarray] = []
+    point_values: list[np.ndarray] = []
+    for lon_idx in basin_lon_sets(longitudes, basin_def):
+        if len(lon_idx) == 0:
+            continue
+        patch = field[np.ix_(lat_idx, lon_idx)]
+        finite_mask = np.isfinite(patch)
+        if not finite_mask.any():
+            continue
+        patch_i, patch_j = np.where(finite_mask)
+        point_lat_indices.append(lat_idx[patch_i])
+        point_lon_indices.append(lon_idx[patch_j])
+        point_values.append(patch[patch_i, patch_j])
+
+    if not point_values:
+        raise ValueError("No finite basin candidate center found")
+
+    candidate_lats = np.concatenate(point_lat_indices)
+    candidate_lons = np.concatenate(point_lon_indices)
+    candidate_values = np.concatenate(point_values).astype("float64")
+    search_count = min(candidate_values.size, max(1, max_search_points))
+    if search_count < candidate_values.size:
+        lowest_indices = np.argpartition(candidate_values, search_count - 1)[:search_count]
+    else:
+        lowest_indices = np.arange(candidate_values.size)
+    lowest_indices = lowest_indices[np.argsort(candidate_values[lowest_indices])]
+
+    centers: list[tuple[int, int, float]] = []
+    for index in lowest_indices:
+        lat_i = int(candidate_lats[index])
+        lon_i = int(candidate_lons[index])
+        if is_local_minimum(field, lat_i, lon_i, local_min_lat_radius, local_min_lon_radius):
+            centers.append((lat_i, lon_i, float(candidate_values[index])))
+
+    if centers:
+        return centers
+
+    center_lat_idx, center_lon_idx, center_slp = basin_candidate_center(field, latitudes, longitudes, basin_def)
+    return [(center_lat_idx, center_lon_idx, center_slp)]
 
 
 def summarize_values(values: list[float]) -> dict[str, float | int]:
@@ -338,6 +446,8 @@ def collect_candidates_for_member(
         lon_core_radius = index_radius(longitudes, args.inner_core_radius_deg)
         lat_wind_radius = index_radius(latitudes, args.wind_search_radius_deg)
         lon_wind_radius = index_radius(longitudes, args.wind_search_radius_deg)
+        lat_local_min_radius = index_radius(latitudes, args.local_min_radius_deg)
+        lon_local_min_radius = index_radius(longitudes, args.local_min_radius_deg)
 
         print(f"Processing {init_date} {ens}: SFC files={len(sfc_files)} ATM files={len(atm_files)}")
 
@@ -413,101 +523,131 @@ def collect_candidates_for_member(
                                 continue
 
                             try:
-                                center_lat_idx, center_lon_idx, center_slp = basin_candidate_center(slp_hpa, latitudes, longitudes, basin_def)
+                                if args.max_centers_per_basin == 1:
+                                    candidate_centers = [basin_candidate_center(slp_hpa, latitudes, longitudes, basin_def)]
+                                else:
+                                    candidate_centers = basin_low_slp_local_minima(
+                                        slp_hpa,
+                                        latitudes,
+                                        longitudes,
+                                        basin_def,
+                                        args.center_search_points,
+                                        lat_local_min_radius,
+                                        lon_local_min_radius,
+                                    )
                             except ValueError:
                                 basin_stats[basin_name]["no_candidate_center"] += 1
                                 continue
 
-                            center_lat = float(latitudes[center_lat_idx])
-                            center_lon = float((longitudes[center_lon_idx] + 180.0) % 360.0 - 180.0)
+                            accepted_centers: list[tuple[int, int]] = []
+                            for center_lat_idx, center_lon_idx, center_slp in candidate_centers:
+                                if len(accepted_centers) >= args.max_centers_per_basin:
+                                    basin_stats[basin_name]["max_centers_reached"] += 1
+                                    break
+                                basin_stats[basin_name]["candidate_centers_evaluated"] += 1
 
-                            slp_env = annulus_mean(
-                                slp_hpa,
-                                center_lat_idx,
-                                center_lon_idx,
-                                lat_env_radius,
-                                lon_env_radius,
-                                lat_core_radius,
-                                lon_core_radius,
-                            )
-                            warm_env = annulus_mean(
-                                warm_core_field,
-                                center_lat_idx,
-                                center_lon_idx,
-                                lat_env_radius,
-                                lon_env_radius,
-                                lat_core_radius,
-                                lon_core_radius,
-                            )
-                            qv_env = annulus_mean(
-                                qv850,
-                                center_lat_idx,
-                                center_lon_idx,
-                                lat_env_radius,
-                                lon_env_radius,
-                                lat_core_radius,
-                                lon_core_radius,
-                            )
+                                center_lat = float(latitudes[center_lat_idx])
+                                center_lon = normalize_lon(float(longitudes[center_lon_idx]))
 
-                            slp_anom = float(center_slp - slp_env)
-                            warm_anom = float(warm_core_field[center_lat_idx, center_lon_idx] - warm_env)
-                            qv_anom = float(qv850[center_lat_idx, center_lon_idx] - qv_env)
-                            criteria = [
-                                slp_anom < 0.0,
-                                warm_anom > 0.0,
-                                qv_anom > 0.0,
-                            ]
+                                slp_env = annulus_mean(
+                                    slp_hpa,
+                                    center_lat_idx,
+                                    center_lon_idx,
+                                    lat_env_radius,
+                                    lon_env_radius,
+                                    lat_core_radius,
+                                    lon_core_radius,
+                                )
+                                warm_env = annulus_mean(
+                                    warm_core_field,
+                                    center_lat_idx,
+                                    center_lon_idx,
+                                    lat_env_radius,
+                                    lon_env_radius,
+                                    lat_core_radius,
+                                    lon_core_radius,
+                                )
+                                qv_env = annulus_mean(
+                                    qv850,
+                                    center_lat_idx,
+                                    center_lon_idx,
+                                    lat_env_radius,
+                                    lon_env_radius,
+                                    lat_core_radius,
+                                    lon_core_radius,
+                                )
 
-                            vort850 = float("nan")
-                            used_vorticity = 0
-                            if u850 is not None and v850 is not None:
-                                vort850 = relative_vorticity(u850, v850, latitudes, longitudes, center_lat_idx, center_lon_idx)
-                                if np.isfinite(vort850):
-                                    used_vorticity = 1
-                                    criteria.append(vort850 > 0.0 if center_lat >= 0.0 else vort850 < 0.0)
+                                slp_anom = float(center_slp - slp_env)
+                                warm_anom = float(warm_core_field[center_lat_idx, center_lon_idx] - warm_env)
+                                qv_anom = float(qv850[center_lat_idx, center_lon_idx] - qv_env)
+                                criteria = [
+                                    slp_anom < 0.0,
+                                    warm_anom > 0.0,
+                                    qv_anom > 0.0,
+                                ]
 
-                            if not all(criteria):
-                                basin_stats[basin_name]["rejected_structure"] += 1
-                                continue
+                                vort850 = float("nan")
+                                used_vorticity = 0
+                                if u850 is not None and v850 is not None:
+                                    vort850 = relative_vorticity(u850, v850, latitudes, longitudes, center_lat_idx, center_lon_idx)
+                                    if np.isfinite(vort850):
+                                        used_vorticity = 1
+                                        criteria.append(vort850 > 0.0 if center_lat >= 0.0 else vort850 < 0.0)
 
-                            vmax_kt, _, _ = max_near_center(
-                                sfc_ws_kt,
-                                center_lat_idx,
-                                center_lon_idx,
-                                lat_wind_radius,
-                                lon_wind_radius,
-                            )
-                            if not np.isfinite(vmax_kt):
-                                basin_stats[basin_name]["missing_vmax"] += 1
-                                continue
+                                if not all(criteria):
+                                    basin_stats[basin_name]["rejected_structure"] += 1
+                                    continue
 
-                            basin_stats[basin_name]["accepted_candidates"] += 1
-                            geos_vmax_by_basin[basin_name].append(float(vmax_kt))
-                            write_candidate(
-                                candidate_writer,
-                                CandidateRow(
-                                    init_date=init_date,
-                                    ens=ens,
-                                    valid_time=valid_time,
-                                    forecast_month=valid_time.strftime("%m"),
-                                    atm_file=str(atm_path),
-                                    atm_time_index=time_index,
-                                    sfc_file=str(sfc_match.file_path),
-                                    sfc_time_index=sfc_match.time_index,
-                                    sfc_valid_time=sfc_match.valid_time,
-                                    sfc_delta_hours=sfc_delta_hours,
-                                    basin_name=basin_name,
-                                    center_lat=center_lat,
-                                    center_lon=center_lon,
-                                    vmax_kt=float(vmax_kt),
-                                    slp_hpa=float(center_slp),
-                                    slp_anom_hpa=slp_anom,
-                                    warm_core_anom_k=warm_anom,
-                                    qv850_anom_gpkg=qv_anom,
-                                    vort850_s1=float(vort850),
-                                    used_vorticity=used_vorticity,
-                                ),
-                            )
+                                if is_too_close_to_accepted(
+                                    center_lat_idx,
+                                    center_lon_idx,
+                                    accepted_centers,
+                                    latitudes,
+                                    longitudes,
+                                    args.min_center_separation_deg,
+                                ):
+                                    basin_stats[basin_name]["duplicate_center"] += 1
+                                    continue
+
+                                vmax_kt, _, _ = max_near_center(
+                                    sfc_ws_kt,
+                                    center_lat_idx,
+                                    center_lon_idx,
+                                    lat_wind_radius,
+                                    lon_wind_radius,
+                                )
+                                if not np.isfinite(vmax_kt):
+                                    basin_stats[basin_name]["missing_vmax"] += 1
+                                    continue
+
+                                accepted_centers.append((center_lat_idx, center_lon_idx))
+                                basin_stats[basin_name]["accepted_candidates"] += 1
+                                geos_vmax_by_basin[basin_name].append(float(vmax_kt))
+                                write_candidate(
+                                    candidate_writer,
+                                    CandidateRow(
+                                        init_date=init_date,
+                                        ens=ens,
+                                        valid_time=valid_time,
+                                        forecast_month=valid_time.strftime("%m"),
+                                        atm_file=str(atm_path),
+                                        atm_time_index=time_index,
+                                        sfc_file=str(sfc_match.file_path),
+                                        sfc_time_index=sfc_match.time_index,
+                                        sfc_valid_time=sfc_match.valid_time,
+                                        sfc_delta_hours=sfc_delta_hours,
+                                        basin_name=basin_name,
+                                        center_lat=center_lat,
+                                        center_lon=center_lon,
+                                        vmax_kt=float(vmax_kt),
+                                        slp_hpa=float(center_slp),
+                                        slp_anom_hpa=slp_anom,
+                                        warm_core_anom_k=warm_anom,
+                                        qv850_anom_gpkg=qv_anom,
+                                        vort850_s1=float(vort850),
+                                        used_vorticity=used_vorticity,
+                                    ),
+                                )
             except OSError as exc:
                 print(f"WARNING: could not read {atm_path}: {exc}; skipping")
     finally:
@@ -539,8 +679,11 @@ def write_thresholds(
         "geos_p90_vmax_kt",
         "geos_max_vmax_kt",
         "evaluated_steps",
+        "candidate_centers_evaluated",
         "accepted_candidates",
         "rejected_structure",
+        "duplicate_center",
+        "max_centers_reached",
         "missing_sfc_match",
         "missing_sfc_wind",
         "init_dates",
@@ -549,6 +692,10 @@ def write_thresholds(
         "environment_radius_deg",
         "inner_core_radius_deg",
         "wind_search_radius_deg",
+        "max_centers_per_basin",
+        "min_center_separation_deg",
+        "local_min_radius_deg",
+        "center_search_points",
         "ignore_vorticity",
     ]
 
@@ -589,8 +736,11 @@ def write_thresholds(
                         "geos_threshold_kt": geos_threshold,
                         **stats,
                         "evaluated_steps": basin_stats[basin_name]["evaluated_steps"],
+                        "candidate_centers_evaluated": basin_stats[basin_name]["candidate_centers_evaluated"],
                         "accepted_candidates": basin_stats[basin_name]["accepted_candidates"],
                         "rejected_structure": basin_stats[basin_name]["rejected_structure"],
+                        "duplicate_center": basin_stats[basin_name]["duplicate_center"],
+                        "max_centers_reached": basin_stats[basin_name]["max_centers_reached"],
                         "missing_sfc_match": basin_stats[basin_name]["missing_sfc_match"],
                         "missing_sfc_wind": basin_stats[basin_name]["missing_sfc_wind"],
                         "init_dates": init_dates_text,
@@ -599,6 +749,10 @@ def write_thresholds(
                         "environment_radius_deg": args.environment_radius_deg,
                         "inner_core_radius_deg": args.inner_core_radius_deg,
                         "wind_search_radius_deg": args.wind_search_radius_deg,
+                        "max_centers_per_basin": args.max_centers_per_basin,
+                        "min_center_separation_deg": args.min_center_separation_deg,
+                        "local_min_radius_deg": args.local_min_radius_deg,
+                        "center_search_points": args.center_search_points,
                         "ignore_vorticity": int(args.ignore_vorticity),
                     }
                 )
@@ -644,6 +798,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--environment-radius-deg", type=float, default=5.0)
     parser.add_argument("--inner-core-radius-deg", type=float, default=1.5)
     parser.add_argument("--wind-search-radius-deg", type=float, default=3.0)
+    parser.add_argument(
+        "--max-centers-per-basin",
+        type=int,
+        default=5,
+        help="Maximum accepted candidate centers to write per basin/time. Use 1 to reproduce the old single-center behavior.",
+    )
+    parser.add_argument(
+        "--min-center-separation-deg",
+        type=float,
+        default=6.0,
+        help="Minimum approximate distance in degrees between accepted centers in the same basin/time.",
+    )
+    parser.add_argument(
+        "--local-min-radius-deg",
+        type=float,
+        default=2.0,
+        help="Neighborhood radius used to identify SLP local minima before structure checks.",
+    )
+    parser.add_argument(
+        "--center-search-points",
+        type=int,
+        default=200,
+        help="Number of lowest-SLP basin grid points inspected for local minima at each basin/time.",
+    )
     parser.add_argument("--ignore-vorticity", action="store_true")
     parser.add_argument("--max-init-dates", type=int, default=0, help="Optional smoke-test limit.")
     return parser.parse_args(argv)
@@ -651,6 +829,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.max_centers_per_basin < 1:
+        print("ERROR: --max-centers-per-basin must be >= 1", file=sys.stderr)
+        return 1
+    if args.center_search_points < 1:
+        print("ERROR: --center-search-points must be >= 1", file=sys.stderr)
+        return 1
+    if args.min_center_separation_deg < 0.0:
+        print("ERROR: --min-center-separation-deg must be >= 0", file=sys.stderr)
+        return 1
+    if args.local_min_radius_deg <= 0.0:
+        print("ERROR: --local-min-radius-deg must be > 0", file=sys.stderr)
+        return 1
+
     init_dates = read_init_dates(args.init_dates_file, args.init_date)
     if args.max_init_dates > 0:
         init_dates = init_dates[: args.max_init_dates]
