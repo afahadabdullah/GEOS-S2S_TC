@@ -84,6 +84,13 @@ class CandidateRow:
     init_date: str
     ens: str
     valid_time: datetime
+    forecast_month: str
+    atm_file: str
+    atm_time_index: int
+    sfc_file: str
+    sfc_time_index: int
+    sfc_valid_time: datetime
+    sfc_delta_hours: float
     basin_name: str
     center_lat: float
     center_lon: float
@@ -126,12 +133,19 @@ def read_init_dates(path: str | None, init_date: str | None) -> list[str]:
     return dates
 
 
-def discover_ensembles(sfc_root: Path, atm_root: Path, init_date: str, requested: list[str]) -> list[str]:
+def discover_ensembles(
+    sfc_root: Path,
+    atm_root: Path,
+    init_date: str,
+    requested: list[str],
+    sfc_collection: str,
+    atm_collection: str,
+) -> list[str]:
     if requested and requested != ["all"]:
         return requested
 
     ensembles = set()
-    for root, collection in ((sfc_root, DEFAULT_SFC_COLLECTION), (atm_root, DEFAULT_ATM_COLLECTION)):
+    for root, collection in ((sfc_root, sfc_collection), (atm_root, atm_collection)):
         init_dir = root / "GEOS_fcst" / init_date
         for path in init_dir.glob(f"ens*/{collection}"):
             if path.is_dir():
@@ -210,6 +224,13 @@ def write_candidates_header(handle) -> csv.DictWriter:
         "init_date",
         "ens",
         "valid_time",
+        "forecast_month",
+        "atm_file",
+        "atm_time_index",
+        "sfc_file",
+        "sfc_time_index",
+        "sfc_valid_time",
+        "sfc_delta_hours",
         "basin_name",
         "center_lat",
         "center_lon",
@@ -232,6 +253,13 @@ def write_candidate(writer: csv.DictWriter, row: CandidateRow) -> None:
             "init_date": row.init_date,
             "ens": row.ens,
             "valid_time": row.valid_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "forecast_month": row.forecast_month,
+            "atm_file": row.atm_file,
+            "atm_time_index": row.atm_time_index,
+            "sfc_file": row.sfc_file,
+            "sfc_time_index": row.sfc_time_index,
+            "sfc_valid_time": row.sfc_valid_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "sfc_delta_hours": row.sfc_delta_hours,
             "basin_name": row.basin_name,
             "center_lat": row.center_lat,
             "center_lon": row.center_lon,
@@ -325,6 +353,7 @@ def collect_candidates_for_member(
                             for basin_name in BASINS:
                                 basin_stats[basin_name]["missing_sfc_match"] += 1
                             continue
+                        sfc_delta_hours = abs((sfc_match.valid_time - valid_time).total_seconds()) / 3600.0
 
                         us_sfc, vs_sfc = sfc_index.load_wind(sfc_match)
                         sfc_ws_kt = np.sqrt(us_sfc**2 + vs_sfc**2) * MPS_TO_KNOTS
@@ -431,6 +460,13 @@ def collect_candidates_for_member(
                                     init_date=init_date,
                                     ens=ens,
                                     valid_time=valid_time,
+                                    forecast_month=valid_time.strftime("%m"),
+                                    atm_file=str(atm_path),
+                                    atm_time_index=time_index,
+                                    sfc_file=str(sfc_match.file_path),
+                                    sfc_time_index=sfc_match.time_index,
+                                    sfc_valid_time=sfc_match.valid_time,
+                                    sfc_delta_hours=sfc_delta_hours,
                                     basin_name=basin_name,
                                     center_lat=center_lat,
                                     center_lon=center_lon,
@@ -567,7 +603,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--init-date", default=None, help="One or more init dates separated by comma/colon/space.")
     parser.add_argument("--init-dates-file", default=None)
     parser.add_argument("--ens", default="ens1", help="One or more ensembles, or 'all'.")
-    parser.add_argument("--months", default="09,10,11")
+    parser.add_argument("--months", default="09,10")
     parser.add_argument("--observed-percentiles", default=DEFAULT_OBS_PERCENTILES)
     parser.add_argument("--observed-wind-vars", default="usa_wind")
     parser.add_argument("--observed-basin-method", default="boxes")
@@ -626,7 +662,14 @@ def main(argv: list[str] | None = None) -> int:
     with candidates_path.open("w", newline="") as handle:
         candidate_writer = write_candidates_header(handle)
         for init_date in init_dates:
-            ensembles = discover_ensembles(Path(args.sfc_root), Path(args.atm_root), init_date, parse_list(args.ens))
+            ensembles = discover_ensembles(
+                Path(args.sfc_root),
+                Path(args.atm_root),
+                init_date,
+                parse_list(args.ens),
+                args.sfc_collection,
+                args.atm_collection,
+            )
             if not ensembles:
                 print(f"WARNING: no ensembles discovered for {init_date}; skipping")
                 continue

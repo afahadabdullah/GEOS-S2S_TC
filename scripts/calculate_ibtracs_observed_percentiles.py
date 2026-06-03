@@ -327,7 +327,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ibtracs", default=DEFAULT_IBTRACS, help="Path to IBTrACS v04r01 NetCDF file.")
     parser.add_argument("--start-year", type=int, default=1991)
     parser.add_argument("--end-year", type=int, default=2024)
-    parser.add_argument("--months", default="9,10,11", help="Months to include, separated by comma/colon/space.")
+    parser.add_argument("--months", default="9,10", help="Months to include, separated by comma/colon/space.")
     parser.add_argument("--threshold-kt", type=float, default=34.0)
     parser.add_argument(
         "--wind-vars",

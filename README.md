@@ -193,7 +193,7 @@ python scripts/calculate_ibtracs_observed_percentiles.py \
   --ibtracs data/obs/ibtracs/IBTrACS.since1980.v04r01.nc \
   --start-year 1991 \
   --end-year 2024 \
-  --months 9,10,11 \
+  --months 9,10 \
   --threshold-kt 34 \
   --wind-vars wmo_wind,usa_wind
 ```
@@ -212,7 +212,7 @@ python scripts/calculate_geos_candidate_thresholds.py \
   --atm-root /nobackupp17/afahad/GEOSS2S3_atm \
   --init-date 20200824 \
   --ens ens1 \
-  --months 09,10,11 \
+  --months 09,10 \
   --observed-percentiles data/obs/ibtracs/ibtracs_observed_percentiles.csv \
   --observed-wind-vars usa_wind
 ```
@@ -221,17 +221,28 @@ This writes two CSV files under `data/calibration/` by default:
 - `geos_candidate_thresholds_<init>_<ens>.csv`
 - `geos_candidate_thresholds_<init>_<ens>_candidates.csv`
 
+The `_candidates.csv` file is the reusable TC-candidate inventory. It records
+the source init date, ensemble, ATM file/time index, matched SFC file/time
+index, valid time, basin, center location, Vmax, and structure-gate diagnostics
+for every accepted GEOS candidate.
+
 Submit the same calculation to PBS:
 
 ```tcsh
-qsub -v INIT_DATE=20200824,ENS=ens1,FORECAST_MONTHS=09,10,11 scripts/submit_geos_candidate_thresholds.pbs
+qsub -v INIT_DATE=20200824,ENS=ens1,FORECAST_MONTHS=09,10 scripts/submit_geos_candidate_thresholds.pbs
 ```
 
 To calibrate over a date list later, pass `INIT_DATES_FILE` and leave
 `INIT_DATE` empty:
 
 ```tcsh
-qsub -v INIT_DATE=,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,ENS=ens1,FORECAST_MONTHS=09,10,11 scripts/submit_geos_candidate_thresholds.pbs
+qsub -v INIT_DATE=,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,ENS=ens1,FORECAST_MONTHS=09,10 scripts/submit_geos_candidate_thresholds.pbs
+```
+
+To write candidates for all available ensemble members, use `ENS=all`:
+
+```tcsh
+qsub -v INIT_DATE=,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,ENS=all,FORECAST_MONTHS=09,10 scripts/submit_geos_candidate_thresholds.pbs
 ```
 
 Example:
@@ -242,7 +253,7 @@ python scripts/calculate_tc_conditioned_ace.py \
   --atm-root /nobackupp17/afahad/GEOSS2S3_atm \
   --init-date 20200824 \
   --ens ens1 \
-  --months 09,10,11
+  --months 09,10
 ```
 
 Notes:
