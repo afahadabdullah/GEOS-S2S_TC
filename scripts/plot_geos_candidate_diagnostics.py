@@ -32,6 +32,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
+    HAS_CARTOPY = True
+except ImportError:
+    HAS_CARTOPY = False
+
 
 BASINS = {
     "North Atlantic": {
@@ -361,7 +369,48 @@ def setup_style() -> None:
     plt.rcParams["figure.facecolor"] = "#ffffff"
 
 
-def draw_basin_boxes(ax) -> None:
+def is_cartopy_axis(ax) -> bool:
+    return HAS_CARTOPY and hasattr(ax, "projection")
+
+
+def map_kwargs(ax) -> dict:
+    return {"transform": ccrs.PlateCarree()} if is_cartopy_axis(ax) else {}
+
+
+def create_global_map_figure(dpi: int, title: str):
+    fig = plt.figure(figsize=(14, 7), dpi=dpi)
+    if HAS_CARTOPY:
+        ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree(central_longitude=180.0))
+        ax.set_extent([-180.0, 180.0, -45.0, 50.0], crs=ccrs.PlateCarree())
+        ax.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)
+        ax.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=1)
+        ax.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.5, zorder=2)
+        ax.add_feature(cfeature.BORDERS, edgecolor="#bbbbbb", linewidth=0.3, linestyle=":", zorder=2)
+        gridliner = ax.gridlines(
+            draw_labels=True,
+            linewidth=0.3,
+            color="#9aa7b1",
+            alpha=0.45,
+            linestyle="--",
+            zorder=3,
+        )
+        gridliner.top_labels = False
+        gridliner.right_labels = False
+        gridliner.xlabel_style = {"size": 8, "color": "#555555"}
+        gridliner.ylabel_style = {"size": 8, "color": "#555555"}
+    else:
+        ax = fig.add_subplot(1, 1, 1)
+        ax.set_facecolor("#daeefb")
+        ax.set_xlim(-180.0, 180.0)
+        ax.set_ylim(-45.0, 50.0)
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
+        ax.grid(True, linewidth=0.35, color="#9aa7b1", alpha=0.45, linestyle="--")
+    ax.set_title(title, fontsize=13, fontweight="bold", pad=12, color="#1e222a")
+    return fig, ax
+
+
+def draw_basin_boxes(ax, label_text_by_basin: dict[str, str] | None = None) -> None:
     for basin_name, basin_def in BASINS.items():
         color = basin_def["color"]
         lat_min, lat_max = basin_def["lat_range"]
@@ -369,19 +418,21 @@ def draw_basin_boxes(ax) -> None:
         for lon_min, lon_max in lon_ranges:
             lons = [lon_min, lon_max, lon_max, lon_min, lon_min]
             lats = [lat_min, lat_min, lat_max, lat_max, lat_min]
-            ax.plot(lons, lats, color=color, linewidth=1.4, alpha=0.85, zorder=3)
+            ax.plot(lons, lats, color=color, linewidth=1.4, alpha=0.85, zorder=4, **map_kwargs(ax))
         label_lon, label_lat = basin_def["label_xy"]
+        label_text = label_text_by_basin.get(basin_name, basin_name.replace(" ", "\n")) if label_text_by_basin else basin_name.replace(" ", "\n")
         ax.text(
             label_lon,
             label_lat,
-            basin_name.replace(" ", "\n"),
+            label_text,
             ha="center",
             va="center",
             color="#1e222a",
             fontsize=7,
             fontweight="bold",
             bbox=dict(boxstyle="round,pad=0.25", fc="#ffffff", ec=color, lw=0.9, alpha=0.82),
-            zorder=5,
+            zorder=6,
+            **map_kwargs(ax),
         )
 
 
@@ -406,15 +457,42 @@ def save_figure(fig, path: Path, dpi: int) -> None:
     print(f"  -> Saved {path}")
 
 
+def active_member_keys(candidates: list[Candidate]) -> list[tuple[str, str]]:
+    keys = {
+        (candidate.init_date, candidate.ens)
+        for candidate in candidates
+        if candidate.init_date and candidate.ens
+    }
+    return sorted(keys)
+
+
+def count_for_member(
+    candidates: list[Candidate],
+    member_key: tuple[str, str],
+    basin_name: str,
+    month: str | None = None,
+) -> int:
+    init_date, ens = member_key
+    return sum(
+        1
+        for candidate in candidates
+        if candidate.init_date == init_date
+        and candidate.ens == ens
+        and candidate.basin_name == basin_name
+        and (month is None or candidate.forecast_month == month)
+    )
+
+
+def mean_count_per_active_member(candidates: list[Candidate], basin_name: str, month: str | None = None) -> float:
+    members = active_member_keys(candidates)
+    if not members:
+        return float("nan")
+    counts = [count_for_member(candidates, member, basin_name, month) for member in members]
+    return float(np.mean(counts)) if counts else float("nan")
+
+
 def plot_global_candidate_map(candidates: list[Candidate], thresholds: dict[str, dict[str, float | str]], path: Path, dpi: int) -> None:
-    fig, ax = plt.subplots(figsize=(14, 7), dpi=dpi)
-    ax.set_facecolor("#daeefb")
-    ax.set_xlim(-180.0, 180.0)
-    ax.set_ylim(-45.0, 50.0)
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-    ax.set_title("GEOS TC Candidate Locations From Cached Inventory", fontsize=13, fontweight="bold", pad=12, color="#1e222a")
-    ax.grid(True, linewidth=0.35, color="#9aa7b1", alpha=0.45, linestyle="--")
+    fig, ax = create_global_map_figure(dpi, "GEOS TC Candidate Locations From Cached Inventory")
     draw_basin_boxes(ax)
 
     if not candidates:
@@ -442,7 +520,8 @@ def plot_global_candidate_map(candidates: list[Candidate], thresholds: dict[str,
             alpha=0.45,
             edgecolors="none",
             label=f"{basin_name} ({len(basin_candidates)})",
-            zorder=4,
+            zorder=5,
+            **map_kwargs(ax),
         )
         if np.any(above):
             ax.scatter(
@@ -453,7 +532,8 @@ def plot_global_candidate_map(candidates: list[Candidate], thresholds: dict[str,
                 alpha=0.9,
                 edgecolors="#1e222a",
                 linewidths=0.45,
-                zorder=6,
+                zorder=7,
+                **map_kwargs(ax),
             )
 
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8, frameon=False)
@@ -461,6 +541,50 @@ def plot_global_candidate_map(candidates: list[Candidate], thresholds: dict[str,
         0.01,
         0.02,
         f"Rows: {len(candidates):,} | Marker size scales with candidate Vmax | Dark outline: above basin threshold when available",
+        transform=ax.transAxes,
+        fontsize=8,
+        color="#333333",
+        bbox=dict(boxstyle="round,pad=0.25", fc="#ffffff", ec="#cccccc", alpha=0.85),
+    )
+    save_figure(fig, path, dpi)
+
+
+def plot_global_basin_count_map(candidates: list[Candidate], path: Path, dpi: int) -> None:
+    members = active_member_keys(candidates)
+    label_text_by_basin: dict[str, str] = {}
+    for basin_name in BASIN_ORDER:
+        total_count = sum(1 for candidate in candidates if candidate.basin_name == basin_name)
+        mean_count = mean_count_per_active_member(candidates, basin_name)
+        if np.isfinite(mean_count):
+            label_text_by_basin[basin_name] = f"{basin_name}\nN={total_count:,}\nmean/member={mean_count:.2f}"
+        else:
+            label_text_by_basin[basin_name] = f"{basin_name}\nN={total_count:,}"
+
+    fig, ax = create_global_map_figure(dpi, "GEOS TC Candidate Counts by Basin")
+    draw_basin_boxes(ax, label_text_by_basin)
+    if not candidates:
+        no_data_text(ax)
+    else:
+        counts = np.asarray([sum(1 for candidate in candidates if candidate.basin_name == basin_name) for basin_name in BASIN_ORDER])
+        max_count = float(np.nanmax(counts)) if counts.size and np.nanmax(counts) > 0 else 1.0
+        for basin_name, count in zip(BASIN_ORDER, counts):
+            label_lon, label_lat = BASINS[basin_name]["label_xy"]
+            size = 120.0 + 700.0 * (float(count) / max_count)
+            ax.scatter(
+                [label_lon],
+                [label_lat],
+                s=size,
+                color=BASINS[basin_name]["color"],
+                alpha=0.22,
+                edgecolors=BASINS[basin_name]["color"],
+                linewidths=1.0,
+                zorder=5,
+                **map_kwargs(ax),
+            )
+    ax.text(
+        0.01,
+        0.02,
+        f"Active init/member pairs represented in candidate rows: {len(members):,}. Zero-candidate members are not visible in candidate-only CSVs.",
         transform=ax.transAxes,
         fontsize=8,
         color="#333333",
@@ -508,6 +632,67 @@ def plot_counts_by_basin_month(candidates: list[Candidate], path: Path, dpi: int
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.legend(frameon=False, ncol=max(1, min(len(months), 4)))
+    save_figure(fig, path, dpi)
+
+
+def plot_ensemble_mean_counts_by_basin_month(candidates: list[Candidate], path: Path, dpi: int) -> None:
+    months = sorted({candidate.forecast_month for candidate in candidates if candidate.forecast_month})
+    if not months:
+        months = ["09", "10"]
+    month_colors = ["#4c78a8", "#f58518", "#54a24b", "#b279a2", "#e45756", "#72b7b2"]
+    members = active_member_keys(candidates)
+
+    fig, ax = plt.subplots(figsize=(11, 5.8), dpi=dpi)
+    x = np.arange(len(BASIN_ORDER))
+    bottom = np.zeros(len(BASIN_ORDER), dtype="float64")
+    for idx, month in enumerate(months):
+        mean_counts = np.asarray(
+            [mean_count_per_active_member(candidates, basin_name, month) for basin_name in BASIN_ORDER],
+            dtype="float64",
+        )
+        mean_counts = np.nan_to_num(mean_counts, nan=0.0)
+        ax.bar(
+            x,
+            mean_counts,
+            bottom=bottom,
+            color=month_colors[idx % len(month_colors)],
+            label=MONTH_LABELS.get(month, month),
+            width=0.68,
+            edgecolor="#ffffff",
+            linewidth=0.7,
+        )
+        bottom += mean_counts
+
+    if not candidates:
+        no_data_text(ax)
+    else:
+        for x_value, total in zip(x, bottom):
+            ax.text(x_value, total, f"{total:.2f}", ha="center", va="bottom", fontsize=8, color="#1e222a")
+    ax.set_xticks(x)
+    ax.set_xticklabels(BASIN_ORDER, rotation=20, ha="right")
+    ax.set_ylabel("Mean Accepted Candidates per Active Init/Member")
+    ax.set_title(
+        "GEOS TC Candidate Counts by Basin and Month, Ensemble-Normalized",
+        fontsize=12,
+        fontweight="bold",
+        pad=10,
+        color="#1e222a",
+    )
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(frameon=False, ncol=max(1, min(len(months), 4)))
+    ax.text(
+        0.01,
+        0.98,
+        f"Denominator: {len(members):,} active init/member pairs represented in candidate rows.",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=8,
+        color="#333333",
+        bbox=dict(boxstyle="round,pad=0.25", fc="#ffffff", ec="#cccccc", alpha=0.85),
+    )
     save_figure(fig, path, dpi)
 
 
@@ -666,10 +851,15 @@ def write_summary_csv(
 ) -> None:
     months = sorted({candidate.forecast_month for candidate in candidates if candidate.forecast_month})
     month_fields = [f"month_{month}_count" for month in months]
+    month_mean_fields = [f"month_{month}_member_mean_count" for month in months]
+    active_members = active_member_keys(candidates)
     fieldnames = [
         "basin_name",
         "candidate_count",
         *month_fields,
+        "active_init_member_pairs",
+        "member_mean_count",
+        *month_mean_fields,
         "n_init_dates",
         "n_ensembles",
         "min_vmax_kt",
@@ -703,6 +893,8 @@ def write_summary_csv(
             row = {
                 "basin_name": basin_name,
                 "candidate_count": len(basin_candidates),
+                "active_init_member_pairs": len(active_members),
+                "member_mean_count": mean_count_per_active_member(candidates, basin_name),
                 "n_init_dates": len({candidate.init_date for candidate in basin_candidates if candidate.init_date}),
                 "n_ensembles": len({candidate.ens for candidate in basin_candidates if candidate.ens}),
                 "min_vmax_kt": stats["min"],
@@ -717,6 +909,7 @@ def write_summary_csv(
             }
             for month in months:
                 row[f"month_{month}_count"] = sum(1 for candidate in basin_candidates if candidate.forecast_month == month)
+                row[f"month_{month}_member_mean_count"] = mean_count_per_active_member(candidates, basin_name, month)
             writer.writerow(row)
     print(f"  -> Wrote {path}")
 
@@ -724,16 +917,18 @@ def write_summary_csv(
 def print_console_summary(candidates: list[Candidate], thresholds: dict[str, dict[str, float | str]]) -> None:
     print("")
     print("GEOS candidate diagnostic summary")
-    print(f"{'basin':20s} {'n':>8s} {'median':>8s} {'p90':>8s} {'threshold':>10s} {'source':>14s}")
+    print(f"{'basin':20s} {'n':>8s} {'mean/member':>12s} {'median':>8s} {'p90':>8s} {'threshold':>10s} {'source':>14s}")
     for basin_name in BASIN_ORDER:
         values = [candidate.vmax_kt for candidate in candidates if candidate.basin_name == basin_name]
         stats = finite_stats(values)
+        mean_count = mean_count_per_active_member(candidates, basin_name)
         threshold_info = thresholds.get(basin_name, {})
         threshold = threshold_info.get("threshold_kt", float("nan"))
         if isinstance(threshold, str):
             threshold = float("nan")
         print(
             f"{basin_name:20s} {len(values):8d} "
+            f"{mean_count:12.2f} "
             f"{stats['median']:8.2f} {stats['p90']:8.2f} "
             f"{float(threshold):10.2f} {str(threshold_info.get('source_kind', '')):>14s}"
         )
@@ -782,7 +977,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Writing diagnostics to: {plot_dir}")
     plot_global_candidate_map(candidates, thresholds, plot_dir / f"{prefix}_global_candidate_map.png", args.dpi)
+    plot_global_basin_count_map(candidates, plot_dir / f"{prefix}_global_basin_count_map.png", args.dpi)
     plot_counts_by_basin_month(candidates, plot_dir / f"{prefix}_candidate_counts_by_basin_month.png", args.dpi)
+    plot_ensemble_mean_counts_by_basin_month(candidates, plot_dir / f"{prefix}_candidate_member_mean_counts_by_basin_month.png", args.dpi)
     plot_vmax_histograms(candidates, thresholds, plot_dir / f"{prefix}_vmax_histograms_by_basin.png", args.dpi)
     plot_year_basin_heatmap(candidates, plot_dir / f"{prefix}_candidate_counts_by_init_year_basin.png", args.dpi)
     plot_threshold_bars(candidates, thresholds, plot_dir / f"{prefix}_thresholds_by_basin.png", args.dpi)
