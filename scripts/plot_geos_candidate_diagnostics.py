@@ -31,6 +31,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 
 try:
     import cartopy.crs as ccrs
@@ -147,6 +148,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--plot-dir", default=DEFAULT_PLOT_DIR)
     parser.add_argument("--prefix", default=None, help="Output filename prefix. Default derives from candidate file names.")
     parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--min-lat", type=float, default=-25.0, help="Minimum candidate latitude to plot. Default trims south of 25S.")
+    parser.add_argument("--max-lat", type=float, default=50.0, help="Maximum candidate latitude to plot.")
+    parser.add_argument("--density-bin-deg", type=float, default=2.0, help="Lat/lon bin size for the global density map.")
     parser.add_argument(
         "--months",
         default="",
@@ -350,6 +354,14 @@ def fill_provisional_thresholds(
     return filled
 
 
+def filter_candidates_by_latitude(candidates: list[Candidate], min_lat: float, max_lat: float) -> list[Candidate]:
+    return [
+        candidate
+        for candidate in candidates
+        if np.isfinite(candidate.center_lat) and min_lat <= candidate.center_lat <= max_lat
+    ]
+
+
 def derive_prefix(candidate_paths: list[Path]) -> str:
     if len(candidate_paths) == 1:
         name = candidate_paths[0].stem
@@ -377,11 +389,11 @@ def map_kwargs(ax) -> dict:
     return {"transform": ccrs.PlateCarree()} if is_cartopy_axis(ax) else {}
 
 
-def create_global_map_figure(dpi: int, title: str):
+def create_global_map_figure(dpi: int, title: str, min_lat: float, max_lat: float):
     fig = plt.figure(figsize=(14, 7), dpi=dpi)
     if HAS_CARTOPY:
         ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree(central_longitude=180.0))
-        ax.set_extent([-180.0, 180.0, -45.0, 50.0], crs=ccrs.PlateCarree())
+        ax.set_extent([-180.0, 180.0, min_lat, max_lat], crs=ccrs.PlateCarree())
         ax.add_feature(cfeature.OCEAN, facecolor="#daeefb", zorder=0)
         ax.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=1)
         ax.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.5, zorder=2)
@@ -402,7 +414,7 @@ def create_global_map_figure(dpi: int, title: str):
         ax = fig.add_subplot(1, 1, 1)
         ax.set_facecolor("#daeefb")
         ax.set_xlim(-180.0, 180.0)
-        ax.set_ylim(-45.0, 50.0)
+        ax.set_ylim(min_lat, max_lat)
         ax.set_xlabel("Longitude")
         ax.set_ylabel("Latitude")
         ax.grid(True, linewidth=0.35, color="#9aa7b1", alpha=0.45, linestyle="--")
@@ -410,7 +422,12 @@ def create_global_map_figure(dpi: int, title: str):
     return fig, ax
 
 
-def draw_basin_boxes(ax, label_text_by_basin: dict[str, str] | None = None) -> None:
+def draw_basin_boxes(
+    ax,
+    label_text_by_basin: dict[str, str] | None = None,
+    min_lat: float | None = None,
+    max_lat: float | None = None,
+) -> None:
     for basin_name, basin_def in BASINS.items():
         color = basin_def["color"]
         lat_min, lat_max = basin_def["lat_range"]
@@ -420,6 +437,10 @@ def draw_basin_boxes(ax, label_text_by_basin: dict[str, str] | None = None) -> N
             lats = [lat_min, lat_min, lat_max, lat_max, lat_min]
             ax.plot(lons, lats, color=color, linewidth=1.4, alpha=0.85, zorder=4, **map_kwargs(ax))
         label_lon, label_lat = basin_def["label_xy"]
+        if min_lat is not None:
+            label_lat = max(label_lat, min_lat + 4.0)
+        if max_lat is not None:
+            label_lat = min(label_lat, max_lat - 4.0)
         label_text = label_text_by_basin.get(basin_name, basin_name.replace(" ", "\n")) if label_text_by_basin else basin_name.replace(" ", "\n")
         ax.text(
             label_lon,
@@ -491,9 +512,16 @@ def mean_count_per_active_member(candidates: list[Candidate], basin_name: str, m
     return float(np.mean(counts)) if counts else float("nan")
 
 
-def plot_global_candidate_map(candidates: list[Candidate], thresholds: dict[str, dict[str, float | str]], path: Path, dpi: int) -> None:
-    fig, ax = create_global_map_figure(dpi, "GEOS TC Candidate Locations From Cached Inventory")
-    draw_basin_boxes(ax)
+def plot_global_candidate_map(
+    candidates: list[Candidate],
+    thresholds: dict[str, dict[str, float | str]],
+    path: Path,
+    dpi: int,
+    min_lat: float,
+    max_lat: float,
+) -> None:
+    fig, ax = create_global_map_figure(dpi, "GEOS TC Candidate Locations From Cached Inventory", min_lat, max_lat)
+    draw_basin_boxes(ax, min_lat=min_lat, max_lat=max_lat)
 
     if not candidates:
         no_data_text(ax)
@@ -507,7 +535,7 @@ def plot_global_candidate_map(candidates: list[Candidate], thresholds: dict[str,
         lons = np.asarray([candidate.center_lon for candidate in basin_candidates])
         lats = np.asarray([candidate.center_lat for candidate in basin_candidates])
         vmax = np.asarray([candidate.vmax_kt for candidate in basin_candidates])
-        sizes = np.clip(10.0 + vmax * 1.4, 18.0, 120.0)
+        sizes = np.clip(4.0 + vmax * 0.12, 7.0, 18.0)
         threshold = thresholds.get(basin_name, {}).get("threshold_kt", float("nan"))
         if isinstance(threshold, str):
             threshold = float("nan")
@@ -517,7 +545,7 @@ def plot_global_candidate_map(candidates: list[Candidate], thresholds: dict[str,
             lats[~above],
             s=sizes[~above],
             c=BASINS[basin_name]["color"],
-            alpha=0.45,
+            alpha=0.34,
             edgecolors="none",
             label=f"{basin_name} ({len(basin_candidates)})",
             zorder=5,
@@ -529,27 +557,61 @@ def plot_global_candidate_map(candidates: list[Candidate], thresholds: dict[str,
                 lats[above],
                 s=sizes[above],
                 c=BASINS[basin_name]["color"],
-                alpha=0.9,
+                alpha=0.78,
                 edgecolors="#1e222a",
-                linewidths=0.45,
+                linewidths=0.25,
                 zorder=7,
                 **map_kwargs(ax),
             )
 
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8, frameon=False)
-    ax.text(
-        0.01,
-        0.02,
-        f"Rows: {len(candidates):,} | Marker size scales with candidate Vmax | Dark outline: above basin threshold when available",
-        transform=ax.transAxes,
-        fontsize=8,
-        color="#333333",
-        bbox=dict(boxstyle="round,pad=0.25", fc="#ffffff", ec="#cccccc", alpha=0.85),
-    )
     save_figure(fig, path, dpi)
 
 
-def plot_global_basin_count_map(candidates: list[Candidate], path: Path, dpi: int) -> None:
+def plot_global_candidate_density_map(
+    candidates: list[Candidate],
+    path: Path,
+    dpi: int,
+    min_lat: float,
+    max_lat: float,
+    bin_deg: float,
+) -> None:
+    fig, ax = create_global_map_figure(dpi, "GEOS TC Candidate Density From Cached Inventory", min_lat, max_lat)
+
+    if not candidates:
+        draw_basin_boxes(ax, min_lat=min_lat, max_lat=max_lat)
+        no_data_text(ax)
+        save_figure(fig, path, dpi)
+        return
+
+    bin_deg = max(0.5, float(bin_deg))
+    lon_edges = np.arange(-180.0, 180.0 + bin_deg, bin_deg)
+    lat_edges = np.arange(min_lat, max_lat + bin_deg, bin_deg)
+    lons = np.asarray([candidate.center_lon for candidate in candidates], dtype="float64")
+    lats = np.asarray([candidate.center_lat for candidate in candidates], dtype="float64")
+    counts, _, _ = np.histogram2d(lats, lons, bins=[lat_edges, lon_edges])
+    masked_counts = np.ma.masked_where(counts <= 0.0, counts)
+
+    max_count = float(np.nanmax(counts)) if np.nanmax(counts) > 0 else 1.0
+    mesh = ax.pcolormesh(
+        lon_edges,
+        lat_edges,
+        masked_counts,
+        cmap="YlOrRd",
+        norm=LogNorm(vmin=1.0, vmax=max_count),
+        alpha=0.82,
+        zorder=3,
+        **map_kwargs(ax),
+    )
+    draw_basin_boxes(ax, min_lat=min_lat, max_lat=max_lat)
+    cbar = fig.colorbar(mesh, ax=ax, orientation="horizontal", pad=0.06, aspect=45, shrink=0.72)
+    cbar.set_label(f"Candidate count per {bin_deg:g}deg x {bin_deg:g}deg bin", fontsize=9, fontweight="bold")
+    cbar.ax.tick_params(labelsize=8)
+    cbar.outline.set_visible(False)
+    save_figure(fig, path, dpi)
+
+
+def plot_global_basin_count_map(candidates: list[Candidate], path: Path, dpi: int, min_lat: float, max_lat: float) -> None:
     members = active_member_keys(candidates)
     label_text_by_basin: dict[str, str] = {}
     for basin_name in BASIN_ORDER:
@@ -560,8 +622,8 @@ def plot_global_basin_count_map(candidates: list[Candidate], path: Path, dpi: in
         else:
             label_text_by_basin[basin_name] = f"{basin_name}\nN={total_count:,}"
 
-    fig, ax = create_global_map_figure(dpi, "GEOS TC Candidate Counts by Basin")
-    draw_basin_boxes(ax, label_text_by_basin)
+    fig, ax = create_global_map_figure(dpi, "GEOS TC Candidate Counts by Basin", min_lat, max_lat)
+    draw_basin_boxes(ax, label_text_by_basin, min_lat=min_lat, max_lat=max_lat)
     if not candidates:
         no_data_text(ax)
     else:
@@ -581,15 +643,6 @@ def plot_global_basin_count_map(candidates: list[Candidate], path: Path, dpi: in
                 zorder=5,
                 **map_kwargs(ax),
             )
-    ax.text(
-        0.01,
-        0.02,
-        f"Active init/member pairs represented in candidate rows: {len(members):,}. Zero-candidate members are not visible in candidate-only CSVs.",
-        transform=ax.transAxes,
-        fontsize=8,
-        color="#333333",
-        bbox=dict(boxstyle="round,pad=0.25", fc="#ffffff", ec="#cccccc", alpha=0.85),
-    )
     save_figure(fig, path, dpi)
 
 
@@ -948,8 +1001,10 @@ def main(argv: list[str] | None = None) -> int:
     print("Reading candidate CSV files:")
     for path in candidate_paths:
         print(f"  - {path}")
-    candidates = read_candidates(candidate_paths, months)
-    print(f"Loaded {len(candidates):,} complete candidate rows.")
+    all_candidates = read_candidates(candidate_paths, months)
+    candidates = filter_candidates_by_latitude(all_candidates, args.min_lat, args.max_lat)
+    print(f"Loaded {len(all_candidates):,} complete candidate rows.")
+    print(f"Using {len(candidates):,} candidate rows after latitude filter {args.min_lat:.1f} to {args.max_lat:.1f}.")
 
     if args.thresholds is None:
         threshold_paths = infer_threshold_paths(candidate_paths)
@@ -967,7 +1022,7 @@ def main(argv: list[str] | None = None) -> int:
         wind_var=args.observed_wind_var,
         basin_method=args.observed_basin_method,
     )
-    thresholds = fill_provisional_thresholds(thresholds, candidates, observed_percentiles, observed_path)
+    thresholds = fill_provisional_thresholds(thresholds, all_candidates, observed_percentiles, observed_path)
 
     prefix = args.prefix or derive_prefix(candidate_paths)
     if months:
@@ -976,8 +1031,16 @@ def main(argv: list[str] | None = None) -> int:
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Writing diagnostics to: {plot_dir}")
-    plot_global_candidate_map(candidates, thresholds, plot_dir / f"{prefix}_global_candidate_map.png", args.dpi)
-    plot_global_basin_count_map(candidates, plot_dir / f"{prefix}_global_basin_count_map.png", args.dpi)
+    plot_global_candidate_density_map(
+        candidates,
+        plot_dir / f"{prefix}_global_candidate_density_map.png",
+        args.dpi,
+        args.min_lat,
+        args.max_lat,
+        args.density_bin_deg,
+    )
+    plot_global_candidate_map(candidates, thresholds, plot_dir / f"{prefix}_global_candidate_map.png", args.dpi, args.min_lat, args.max_lat)
+    plot_global_basin_count_map(candidates, plot_dir / f"{prefix}_global_basin_count_map.png", args.dpi, args.min_lat, args.max_lat)
     plot_counts_by_basin_month(candidates, plot_dir / f"{prefix}_candidate_counts_by_basin_month.png", args.dpi)
     plot_ensemble_mean_counts_by_basin_month(candidates, plot_dir / f"{prefix}_candidate_member_mean_counts_by_basin_month.png", args.dpi)
     plot_vmax_histograms(candidates, thresholds, plot_dir / f"{prefix}_vmax_histograms_by_basin.png", args.dpi)
