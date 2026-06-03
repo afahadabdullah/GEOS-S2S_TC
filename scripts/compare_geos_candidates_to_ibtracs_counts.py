@@ -567,6 +567,68 @@ def build_summary_rows(yearly_rows: list[dict[str, object]]) -> list[dict[str, o
     return rows
 
 
+def build_percentile_rows(
+    geos_candidates: list[GeosCandidate],
+    wind_samples: dict[str, list[float]],
+    geos_thresholds: dict[str, float],
+    observed_threshold_kt: float,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    values_by_basin: dict[str, list[float]] = defaultdict(list)
+    for candidate in geos_candidates:
+        values_by_basin[candidate.basin_name].append(candidate.vmax_kt)
+
+    for basin_name in BASIN_ORDER:
+        obs_values = np.asarray(wind_samples.get(basin_name, []), dtype="float64")
+        geos_values = np.asarray(values_by_basin.get(basin_name, []), dtype="float64")
+        obs_values = obs_values[np.isfinite(obs_values)]
+        geos_values = geos_values[np.isfinite(geos_values)]
+        threshold = geos_thresholds.get(basin_name, float("nan"))
+
+        if obs_values.size:
+            obs_le_count = int(np.sum(obs_values <= observed_threshold_kt))
+            obs_ge_count = int(np.sum(obs_values >= observed_threshold_kt))
+            obs_percentile_le = obs_le_count / float(obs_values.size)
+            obs_exceedance = obs_ge_count / float(obs_values.size)
+        else:
+            obs_le_count = 0
+            obs_ge_count = 0
+            obs_percentile_le = float("nan")
+            obs_exceedance = float("nan")
+
+        if geos_values.size and np.isfinite(threshold):
+            geos_le_count = int(np.sum(geos_values <= threshold))
+            geos_ge_count = int(np.sum(geos_values >= threshold))
+            geos_percentile_le = geos_le_count / float(geos_values.size)
+            geos_exceedance = geos_ge_count / float(geos_values.size)
+        else:
+            geos_le_count = 0
+            geos_ge_count = 0
+            geos_percentile_le = float("nan")
+            geos_exceedance = float("nan")
+
+        rows.append(
+            {
+                "basin_name": basin_name,
+                "ibtracs_sample_count": int(obs_values.size),
+                "ibtracs_count_le_34kt": obs_le_count,
+                "ibtracs_count_ge_34kt": obs_ge_count,
+                "ibtracs_fraction_le_34kt": obs_percentile_le,
+                "ibtracs_fraction_ge_34kt": obs_exceedance,
+                "geos_candidate_count": int(geos_values.size),
+                "geos_threshold_kt": threshold,
+                "geos_count_le_threshold": geos_le_count,
+                "geos_count_ge_threshold": geos_ge_count,
+                "geos_fraction_le_threshold": geos_percentile_le,
+                "geos_fraction_ge_threshold": geos_exceedance,
+                "fraction_ge_difference": geos_exceedance - obs_exceedance
+                if np.isfinite(geos_exceedance) and np.isfinite(obs_exceedance)
+                else float("nan"),
+            }
+        )
+    return rows
+
+
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
@@ -633,6 +695,49 @@ def plot_ratio(rows: list[dict[str, object]], path: Path, dpi: int) -> None:
     save_figure(fig, path, dpi)
 
 
+def plot_percentile_sanity(rows: list[dict[str, object]], path: Path, dpi: int) -> None:
+    fig, ax = plt.subplots(figsize=(12, 5.6), dpi=dpi)
+    x = np.arange(len(BASIN_ORDER))
+    width = 0.35
+    obs = np.asarray(
+        [next(row for row in rows if row["basin_name"] == basin)["ibtracs_fraction_ge_34kt"] for basin in BASIN_ORDER],
+        dtype="float64",
+    )
+    geos = np.asarray(
+        [next(row for row in rows if row["basin_name"] == basin)["geos_fraction_ge_threshold"] for basin in BASIN_ORDER],
+        dtype="float64",
+    )
+    ax.bar(x - width / 2, obs, width, color="#344e86", label="IBTrACS fraction >= 34 kt")
+    ax.bar(x + width / 2, geos, width, color="#e55934", label="GEOS fraction >= calibrated threshold")
+    for x_value, basin_name in zip(x, BASIN_ORDER):
+        row = next(item for item in rows if item["basin_name"] == basin_name)
+        threshold = float(row["geos_threshold_kt"])
+        obs_fraction = float(row["ibtracs_fraction_ge_34kt"])
+        geos_fraction = float(row["geos_fraction_ge_threshold"])
+        if np.isfinite(threshold) and np.isfinite(obs_fraction) and np.isfinite(geos_fraction):
+            ax.text(
+                x_value,
+                max(obs_fraction, geos_fraction) + 0.025,
+                f"T={threshold:.1f} kt",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                color="#1e222a",
+            )
+    ax.set_xticks(x)
+    ax.set_xticklabels(BASIN_ORDER, rotation=20, ha="right")
+    finite_values = np.concatenate([obs[np.isfinite(obs)], geos[np.isfinite(geos)]])
+    ymax = float(np.nanmax(finite_values)) if finite_values.size else 0.2
+    ax.set_ylim(0.0, min(1.05, max(0.2, ymax + 0.12)))
+    ax.set_ylabel("Fraction of Samples")
+    ax.set_title("Percentile Sanity Check: Observed 34 kt vs GEOS Basin Threshold", fontsize=12, fontweight="bold", pad=10)
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(frameon=False)
+    save_figure(fig, path, dpi)
+
+
 def plot_yearly_panels(yearly_rows: list[dict[str, object]], path: Path, dpi: int) -> None:
     years = sorted({int(row["year"]) for row in yearly_rows})
     fig, axes = plt.subplots(2, 3, figsize=(14, 7.5), dpi=dpi, sharex=True)
@@ -658,13 +763,15 @@ def plot_monthly_summary(rows: list[dict[str, object]], path: Path, dpi: int) ->
     if len(months) == 1:
         axes = [axes]
     x = np.arange(len(BASIN_ORDER))
-    width = 0.35
+    width = 0.26
     for ax, month in zip(axes, months):
         month_rows = [row for row in rows if row["month"] == month]
         obs = np.asarray([next(row for row in month_rows if row["basin_name"] == basin)["ibtracs_fix_year_mean"] for basin in BASIN_ORDER], dtype="float64")
+        geos_struct = np.asarray([next(row for row in month_rows if row["basin_name"] == basin)["geos_structural_member_year_mean"] for basin in BASIN_ORDER], dtype="float64")
         geos = np.asarray([next(row for row in month_rows if row["basin_name"] == basin)["geos_ts_equiv_member_year_mean"] for basin in BASIN_ORDER], dtype="float64")
-        ax.bar(x - width / 2, obs, width, color="#344e86", label="IBTrACS TS fixes/year")
-        ax.bar(x + width / 2, geos, width, color="#e55934", label="GEOS TS-equiv/member/year")
+        ax.bar(x - width, obs, width, color="#344e86", label="IBTrACS TS fixes/year")
+        ax.bar(x, geos_struct, width, color="#9aa7b1", label="GEOS structural/member/year")
+        ax.bar(x + width, geos, width, color="#e55934", label="GEOS TS-equiv/member/year")
         ax.set_title(MONTH_LABELS.get(month, month), fontsize=11, fontweight="bold")
         ax.set_xticks(x)
         ax.set_xticklabels(BASIN_ORDER, rotation=25, ha="right")
@@ -688,6 +795,20 @@ def print_summary(rows: list[dict[str, object]]) -> None:
             f"{float(row['ibtracs_fix_year_mean']):12.2f} "
             f"{float(row['geos_ts_equiv_member_year_mean']):18.2f} "
             f"{float(row['geos_to_ibtracs_fix_ratio']):8.2f} "
+            f"{float(row['geos_threshold_kt']):8.2f}"
+        )
+
+
+def print_percentile_summary(rows: list[dict[str, object]]) -> None:
+    print("")
+    print("Percentile sanity check")
+    print(f"{'basin':20s} {'IB >=34':>10s} {'GEOS >=T':>10s} {'diff':>10s} {'T_geos':>8s}")
+    for row in rows:
+        print(
+            f"{str(row['basin_name']):20s} "
+            f"{float(row['ibtracs_fraction_ge_34kt']):10.3f} "
+            f"{float(row['geos_fraction_ge_threshold']):10.3f} "
+            f"{float(row['fraction_ge_difference']):10.3f} "
             f"{float(row['geos_threshold_kt']):8.2f}"
         )
 
@@ -757,19 +878,23 @@ def main(argv: list[str] | None = None) -> int:
     yearly_rows = build_yearly_rows(geos_candidates, ibtracs_fixes, geos_thresholds, args)
     monthly_rows = build_monthly_rows(geos_candidates, ibtracs_fixes, geos_thresholds, args)
     summary_rows = build_summary_rows(yearly_rows)
+    percentile_rows = build_percentile_rows(all_geos_candidates, wind_samples, geos_thresholds, args.threshold_kt)
 
     output_dir = Path(args.output_dir)
     plot_dir = Path(args.plot_dir)
     write_csv(output_dir / f"{args.prefix}_yearly.csv", yearly_rows)
     write_csv(output_dir / f"{args.prefix}_monthly.csv", monthly_rows)
     write_csv(output_dir / f"{args.prefix}_summary.csv", summary_rows)
+    write_csv(output_dir / f"{args.prefix}_percentile_sanity.csv", percentile_rows)
 
     plot_basin_summary(summary_rows, plot_dir / f"{args.prefix}_basin_mean_counts.png", args.dpi)
     plot_ratio(summary_rows, plot_dir / f"{args.prefix}_geos_to_ibtracs_ratio.png", args.dpi)
+    plot_percentile_sanity(percentile_rows, plot_dir / f"{args.prefix}_percentile_sanity.png", args.dpi)
     plot_yearly_panels(yearly_rows, plot_dir / f"{args.prefix}_yearly_counts_by_basin.png", args.dpi)
     plot_monthly_summary(monthly_rows, plot_dir / f"{args.prefix}_monthly_counts.png", args.dpi)
 
     print_summary(summary_rows)
+    print_percentile_summary(percentile_rows)
     if args.expected_members_per_year <= 0:
         print("")
         print("NOTE: GEOS member means use active init/member pairs visible in the candidate CSV.")
