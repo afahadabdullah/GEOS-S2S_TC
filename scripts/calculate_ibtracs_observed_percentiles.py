@@ -12,7 +12,9 @@ That percentile can then be mapped onto the GEOS candidate wind distribution:
 
 By default, samples are assigned to the same latitude/longitude basin boxes used
 by the TC-conditioned ACE script, so the observed percentiles line up with the
-model regions where thresholds will be applied.
+model regions where thresholds will be applied. Samples are also filtered to
+IBTrACS ``NATURE=TS`` by default, which keeps tropical cyclone fixes and removes
+disturbance, subtropical, extratropical, mixed, and unreported-nature fixes.
 """
 
 from __future__ import annotations
@@ -95,6 +97,12 @@ def decode_chars(values) -> str:
     return "".join(chars).strip()
 
 
+def read_storm_time_text(variable, storm_index: int, time_index: int) -> str:
+    if getattr(variable, "ndim", 0) <= 2:
+        return decode_chars(variable[storm_index, time_index])
+    return decode_chars(variable[storm_index, time_index, :])
+
+
 def normalize_lon(lon: float) -> float:
     return ((lon + 180.0) % 360.0) - 180.0
 
@@ -155,6 +163,10 @@ def date_is_selected(date_value, start_year: int, end_year: int, months: set[int
     return True
 
 
+def nature_is_selected(nature_value: str, allowed_natures: set[str]) -> bool:
+    return not allowed_natures or nature_value.strip().upper() in allowed_natures
+
+
 def summarize(values: list[float], threshold_kt: float) -> dict[str, float | int]:
     array = np.asarray(values, dtype="float64")
     if array.size == 0:
@@ -188,8 +200,10 @@ def summarize(values: list[float], threshold_kt: float) -> dict[str, float | int
 def calculate_percentiles(args: argparse.Namespace) -> list[dict[str, object]]:
     months = parse_int_set(args.months)
     wind_vars = parse_list(args.wind_vars)
+    allowed_natures = {item.upper() for item in parse_list(args.nature_filter)}
     samples: dict[tuple[str, str], list[float]] = defaultdict(list)
     skipped_no_basin = 0
+    skipped_nature = 0
     skipped_no_time = 0
 
     with netCDF4.Dataset(args.ibtracs, "r") as ds:
@@ -198,6 +212,8 @@ def calculate_percentiles(args: argparse.Namespace) -> list[dict[str, object]]:
             raise ValueError(f"Missing requested wind variable(s): {', '.join(missing_vars)}")
 
         required_vars = ["time", "lat", "lon", "basin"]
+        if allowed_natures:
+            required_vars.append("nature")
         missing_required = [name for name in required_vars if name not in ds.variables]
         if missing_required:
             raise ValueError(f"Missing required IBTrACS variable(s): {', '.join(missing_required)}")
@@ -214,6 +230,7 @@ def calculate_percentiles(args: argparse.Namespace) -> list[dict[str, object]]:
         lat_values = ds.variables["lat"][:]
         lon_values = ds.variables["lon"][:]
         basin_values = ds.variables["basin"]
+        nature_values = ds.variables["nature"] if allowed_natures else None
         wind_values = {name: ds.variables[name][:] for name in wind_vars}
 
         nstorm, ntime = time_values.shape
@@ -226,6 +243,12 @@ def calculate_percentiles(args: argparse.Namespace) -> list[dict[str, object]]:
                 date_value = dates[storm_index, time_index]
                 if not date_is_selected(date_value, args.start_year, args.end_year, months, args.synoptic_only):
                     continue
+
+                if nature_values is not None:
+                    nature = read_storm_time_text(nature_values, storm_index, time_index)
+                    if not nature_is_selected(nature, allowed_natures):
+                        skipped_nature += 1
+                        continue
 
                 lat = finite_position_value(lat_values[storm_index, time_index])
                 lon = finite_position_value(lon_values[storm_index, time_index])
@@ -263,12 +286,14 @@ def calculate_percentiles(args: argparse.Namespace) -> list[dict[str, object]]:
                     "end_year": args.end_year,
                     "months": ",".join(str(month) for month in sorted(months)),
                     "synoptic_only": int(args.synoptic_only),
+                    "nature_filter": ",".join(sorted(allowed_natures)) if allowed_natures else "ALL",
                     **stats,
                 }
             )
 
     if args.verbose:
         print(f"Skipped missing time samples: {skipped_no_time}")
+        print(f"Skipped samples outside nature filter: {skipped_nature}")
         print(f"Skipped samples outside supported basins/missing position: {skipped_no_basin}")
 
     return rows
@@ -286,6 +311,7 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "end_year",
         "months",
         "synoptic_only",
+        "nature_filter",
         "n_samples",
         "count_le_threshold",
         "p_obs_threshold",
@@ -339,6 +365,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("boxes", "ibtracs_code"),
         default="boxes",
         help="Assign samples using model basin boxes or the IBTrACS basin code variable.",
+    )
+    parser.add_argument(
+        "--nature-filter",
+        default="TS",
+        help="IBTrACS NATURE codes to keep, separated by comma/colon/space. Default TS keeps tropical fixes only.",
+    )
+    parser.add_argument(
+        "--all-natures",
+        action="store_const",
+        const="",
+        dest="nature_filter",
+        help="Disable IBTrACS NATURE filtering.",
     )
     parser.add_argument(
         "--all-hours",

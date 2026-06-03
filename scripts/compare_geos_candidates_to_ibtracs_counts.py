@@ -5,7 +5,9 @@ GEOS candidate CSV rows are one structurally selected center per basin/time, not
 tracked storms. The closest observed count comparison is therefore the number of
 IBTrACS basin/times with at least one tropical-storm fix. Raw IBTrACS 6-hour fix
 counts and unique storms are still reported as context, but the default plots
-use active basin-times.
+use active basin-times. IBTrACS fixes are filtered to ``NATURE=TS`` by default,
+which keeps tropical cyclone fixes and removes disturbance, subtropical,
+extratropical, mixed, and unreported-nature fixes.
 
 By default, GEOS basin thresholds are recomputed from the candidate CSVs being
 compared. That keeps the quantile-matching sanity check apples-to-apples when
@@ -159,6 +161,10 @@ def ibtracs_count_for_metric(fixes: list[IbtracsFix], metric: str) -> int:
     return len(fixes)
 
 
+def nature_is_selected(nature_value: str, allowed_natures: set[str]) -> bool:
+    return not allowed_natures or nature_value.strip().upper() in allowed_natures
+
+
 def parse_list(value: str | None) -> list[str]:
     if not value:
         return []
@@ -238,6 +244,12 @@ def decode_chars(values) -> str:
             if value > 0:
                 chars.append(chr(value))
     return "".join(chars).strip()
+
+
+def read_storm_time_text(variable, storm_index: int, time_index: int) -> str:
+    if getattr(variable, "ndim", 0) <= 2:
+        return decode_chars(variable[storm_index, time_index])
+    return decode_chars(variable[storm_index, time_index, :])
 
 
 def normalize_lon(lon: float) -> float:
@@ -352,12 +364,16 @@ def read_thresholds(paths: list[Path], observed_wind_var: str, basin_method: str
 
 def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, list[float]]]:
     months = parse_months(args.months)
+    allowed_natures = {item.upper() for item in parse_list(args.nature_filter)}
     fixes: list[IbtracsFix] = []
     wind_samples: dict[str, list[float]] = defaultdict(list)
     skipped = 0
+    skipped_nature = 0
 
     with netCDF4.Dataset(args.ibtracs, "r") as ds:
         required = ["time", "lat", "lon", args.wind_var]
+        if allowed_natures:
+            required.append("nature")
         if args.basin_method == "ibtracs_code":
             required.append("basin")
         missing = [name for name in required if name not in ds.variables]
@@ -376,6 +392,7 @@ def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, 
         lon_values = ds.variables["lon"][:]
         wind_values = ds.variables[args.wind_var][:]
         basin_values = ds.variables["basin"] if "basin" in ds.variables else None
+        nature_values = ds.variables["nature"] if allowed_natures else None
         sid_values = ds.variables["sid"] if "sid" in ds.variables else None
 
         nstorm, ntime = time_values.shape
@@ -394,6 +411,11 @@ def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, 
                     continue
                 if not valid_year_month(year, month, args.start_year, args.end_year, months):
                     continue
+                if nature_values is not None:
+                    nature = read_storm_time_text(nature_values, storm_index, time_index)
+                    if not nature_is_selected(nature, allowed_natures):
+                        skipped_nature += 1
+                        continue
 
                 lat = finite_value(lat_values[storm_index, time_index])
                 lon = finite_value(lon_values[storm_index, time_index])
@@ -432,6 +454,8 @@ def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, 
 
     if skipped:
         print(f"Skipped {skipped} incomplete/unassigned IBTrACS samples.")
+    if skipped_nature:
+        print(f"Skipped {skipped_nature} IBTrACS samples outside nature filter: {args.nature_filter or 'ALL'}")
     return fixes, wind_samples
 
 
@@ -518,6 +542,7 @@ def build_yearly_rows(
                 {
                     "year": year,
                     "basin_name": basin_name,
+                    "nature_filter": args.nature_filter or "ALL",
                     "ibtracs_count_metric": args.observed_count_metric,
                     "ibtracs_count_for_comparison": obs_comparison_count,
                     "ibtracs_fix_count": len(obs_fixes),
@@ -605,6 +630,7 @@ def build_monthly_rows(
                 {
                     "month": month,
                     "basin_name": basin_name,
+                    "nature_filter": args.nature_filter or "ALL",
                     "ibtracs_count_metric": args.observed_count_metric,
                     "comparison_year_count": len(comparison_years),
                     "comparison_years": ",".join(str(year) for year in comparison_years),
@@ -647,6 +673,7 @@ def build_summary_rows(yearly_rows: list[dict[str, object]]) -> list[dict[str, o
         rows.append(
             {
                 "basin_name": basin_name,
+                "nature_filter": str(basin_rows[0].get("nature_filter", "ALL")) if basin_rows else "ALL",
                 "ibtracs_count_metric": metric,
                 "comparison_year_count": len(comparison_rows),
                 "comparison_years": ",".join(str(row["year"]) for row in comparison_rows),
@@ -753,6 +780,7 @@ def count_matched_geos_thresholds(
         rows.append(
             {
                 "basin_name": basin_name,
+                "nature_filter": args.nature_filter or "ALL",
                 "ibtracs_count_metric": args.observed_count_metric,
                 "comparison_year_count": year_count,
                 "comparison_years": ",".join(str(year) for year in comparison_years),
@@ -776,6 +804,7 @@ def build_percentile_rows(
     wind_samples: dict[str, list[float]],
     geos_thresholds: dict[str, float],
     observed_threshold_kt: float,
+    nature_filter: str,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     values_by_basin: dict[str, list[float]] = defaultdict(list)
@@ -828,6 +857,7 @@ def build_percentile_rows(
         rows.append(
             {
                 "basin_name": basin_name,
+                "nature_filter": nature_filter or "ALL",
                 "ibtracs_sample_count": int(obs_values.size),
                 "ibtracs_count_le_34kt": obs_le_count,
                 "ibtracs_count_ge_34kt": obs_ge_count,
@@ -1082,6 +1112,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--threshold-kt", type=float, default=34.0)
     parser.add_argument("--basin-method", choices=("boxes", "ibtracs_code"), default="boxes")
     parser.add_argument(
+        "--nature-filter",
+        default="TS",
+        help="IBTrACS NATURE codes to keep, separated by comma/colon/space. Default TS keeps tropical fixes only.",
+    )
+    parser.add_argument(
+        "--all-natures",
+        action="store_const",
+        const="",
+        dest="nature_filter",
+        help="Disable IBTrACS NATURE filtering.",
+    )
+    parser.add_argument(
         "--observed-count-metric",
         choices=("active_time", "fixes"),
         default="active_time",
@@ -1151,7 +1193,7 @@ def main(argv: list[str] | None = None) -> int:
     yearly_rows = build_yearly_rows(geos_candidates, ibtracs_fixes, geos_thresholds, args)
     monthly_rows = build_monthly_rows(geos_candidates, ibtracs_fixes, geos_thresholds, args)
     summary_rows = build_summary_rows(yearly_rows)
-    percentile_rows = build_percentile_rows(all_geos_candidates, wind_samples, geos_thresholds, args.threshold_kt)
+    percentile_rows = build_percentile_rows(all_geos_candidates, wind_samples, geos_thresholds, args.threshold_kt, args.nature_filter)
 
     output_dir = Path(args.output_dir)
     plot_dir = Path(args.plot_dir)
