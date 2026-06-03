@@ -1,0 +1,218 @@
+#!/bin/bash -l
+
+#######################################################################
+#                     Batch Parameters for Run Job
+#######################################################################
+
+#PBS -l walltime=8:00:00
+#PBS -l select=1:ncpus=1:mpiprocs=1:model=sky_ele
+#PBS -N geos_tc_thresh
+#PBS -q normal
+#PBS -W group_list=s2406
+#PBS -j oe -k oed
+
+# Calculate basin-dependent GEOS candidate wind thresholds by mapping observed
+# IBTrACS 34-kt percentiles onto structurally gated GEOS TC-candidate Vmax.
+
+set -u
+umask 022
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+
+if [[ -d "${SUBMIT_DIR}/scripts" ]]; then
+  REPO_ROOT="${SUBMIT_DIR}"
+elif [[ "$(basename "${SUBMIT_DIR}")" == "scripts" ]]; then
+  REPO_ROOT="${SUBMIT_DIR%/scripts}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  REPO_ROOT="${SCRIPT_DIR%/scripts}"
+fi
+
+SFC_ROOT="${SFC_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
+ATM_ROOT="${ATM_ROOT:-/nobackupp17/afahad/GEOSS2S3_atm}"
+SFC_COLLECTION="${SFC_COLLECTION:-sfc_tavg_3hr_glo_L720x361_sfc}"
+ATM_COLLECTION="${ATM_COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
+INIT_DATE="${INIT_DATE:-20200824}"
+INIT_DATES_FILE="${INIT_DATES_FILE:-}"
+ENS="${ENS:-ens1}"
+FORECAST_MONTHS="${FORECAST_MONTHS:-09,10,11}"
+OBSERVED_PERCENTILES="${OBSERVED_PERCENTILES:-${REPO_ROOT}/data/obs/ibtracs/ibtracs_observed_percentiles.csv}"
+OBSERVED_WIND_VARS="${OBSERVED_WIND_VARS:-usa_wind}"
+OBSERVED_BASIN_METHOD="${OBSERVED_BASIN_METHOD:-boxes}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/data/calibration}"
+OUTPUT_PREFIX="${OUTPUT_PREFIX:-}"
+SFC_MATCH_TOLERANCE_HOURS="${SFC_MATCH_TOLERANCE_HOURS:-3.1}"
+ENVIRONMENT_RADIUS_DEG="${ENVIRONMENT_RADIUS_DEG:-5.0}"
+INNER_CORE_RADIUS_DEG="${INNER_CORE_RADIUS_DEG:-1.5}"
+WIND_SEARCH_RADIUS_DEG="${WIND_SEARCH_RADIUS_DEG:-3.0}"
+IGNORE_VORTICITY="${IGNORE_VORTICITY:-0}"
+MAX_INIT_DATES="${MAX_INIT_DATES:-0}"
+CONDA_ENV="${CONDA_ENV:-earth}"
+CONDA_BASE="${CONDA_BASE:-}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+
+resolve_conda_base() {
+  local candidate
+  local candidates=()
+
+  if [[ -n "${CONDA_BASE}" && -d "${CONDA_BASE}" ]]; then
+    return 0
+  fi
+
+  if command -v conda >/dev/null 2>&1; then
+    CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+    if [[ -n "${CONDA_BASE}" && -d "${CONDA_BASE}" ]]; then
+      return 0
+    fi
+  fi
+
+  candidates=(
+    "${HOME:-}/miniconda3"
+    "${HOME:-}/miniforge3"
+    "${HOME:-}/anaconda3"
+    "/nobackupnfs1/afahad/miniconda3"
+    "/nobackupnfs1/afahad/miniforge3"
+    "/nobackupp27/afahad/miniconda3"
+    "/nobackupp27/afahad/miniforge3"
+    "/nobackupp27/afahad/anaconda3"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "${candidate}" && -d "${candidate}" ]]; then
+      CONDA_BASE="${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+activate_conda_env() {
+  local activate_status
+
+  if [[ -z "${CONDA_ENV}" || "${CONDA_ENV}" == "none" ]]; then
+    echo "Skipping conda activation because CONDA_ENV=${CONDA_ENV}"
+    return 0
+  fi
+
+  if ! resolve_conda_base; then
+    echo "ERROR could not find conda base."
+    echo "Pass it explicitly, for example:"
+    echo "  qsub -v CONDA_BASE=/path/to/miniconda3,CONDA_ENV=${CONDA_ENV} ..."
+    return 1
+  fi
+
+  if [[ -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
+    set +u
+    # shellcheck disable=SC1091
+    source "${CONDA_BASE}/etc/profile.d/conda.sh"
+    conda activate "${CONDA_ENV}"
+    activate_status=$?
+    set -u
+    return "${activate_status}"
+  elif [[ -f "${CONDA_BASE}/bin/activate" ]]; then
+    set +u
+    # shellcheck disable=SC1091
+    source "${CONDA_BASE}/bin/activate" "${CONDA_ENV}"
+    activate_status=$?
+    set -u
+    return "${activate_status}"
+  else
+    echo "ERROR conda activation scripts not found under CONDA_BASE=${CONDA_BASE}"
+    return 1
+  fi
+}
+
+echo "Job started: $(date)"
+echo "REPO_ROOT=${REPO_ROOT}"
+echo "SFC_ROOT=${SFC_ROOT}"
+echo "ATM_ROOT=${ATM_ROOT}"
+echo "SFC_COLLECTION=${SFC_COLLECTION}"
+echo "ATM_COLLECTION=${ATM_COLLECTION}"
+echo "INIT_DATE=${INIT_DATE}"
+echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
+echo "ENS=${ENS}"
+echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
+echo "OBSERVED_PERCENTILES=${OBSERVED_PERCENTILES}"
+echo "OBSERVED_WIND_VARS=${OBSERVED_WIND_VARS}"
+echo "OBSERVED_BASIN_METHOD=${OBSERVED_BASIN_METHOD}"
+echo "OUTPUT_DIR=${OUTPUT_DIR}"
+echo "OUTPUT_PREFIX=${OUTPUT_PREFIX}"
+echo "IGNORE_VORTICITY=${IGNORE_VORTICITY}"
+echo "CONDA_ENV=${CONDA_ENV}"
+echo "CONDA_BASE=${CONDA_BASE:-auto}"
+
+cd "${REPO_ROOT}"
+mkdir -p "${OUTPUT_DIR}"
+export MPLCONFIGDIR="${TMPDIR:-/tmp}/matplotlib-${PBS_JOBID:-geos_tc_thresh}"
+mkdir -p "${MPLCONFIGDIR}"
+
+if ! activate_conda_env; then
+  exit 6
+fi
+
+if [[ -z "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)"
+fi
+
+if [[ -z "${PYTHON_BIN}" ]]; then
+  echo "ERROR python was not found after conda activation."
+  exit 7
+fi
+
+echo "ACTIVE_CONDA_PREFIX=${CONDA_PREFIX:-}"
+echo "PYTHON_BIN=${PYTHON_BIN}"
+"${PYTHON_BIN}" - <<'PY'
+import netCDF4
+import numpy
+print("Python dependency check passed: netCDF4 and numpy are available")
+PY
+dep_status=$?
+if (( dep_status != 0 )); then
+  echo "ERROR Python dependency check failed in CONDA_ENV=${CONDA_ENV}"
+  exit 8
+fi
+
+cmd=(
+  "${PYTHON_BIN}" scripts/calculate_geos_candidate_thresholds.py
+  --sfc-root "${SFC_ROOT}"
+  --atm-root "${ATM_ROOT}"
+  --sfc-collection "${SFC_COLLECTION}"
+  --atm-collection "${ATM_COLLECTION}"
+  --ens "${ENS}"
+  --months "${FORECAST_MONTHS}"
+  --observed-percentiles "${OBSERVED_PERCENTILES}"
+  --observed-wind-vars "${OBSERVED_WIND_VARS}"
+  --observed-basin-method "${OBSERVED_BASIN_METHOD}"
+  --output-dir "${OUTPUT_DIR}"
+  --sfc-match-tolerance-hours "${SFC_MATCH_TOLERANCE_HOURS}"
+  --environment-radius-deg "${ENVIRONMENT_RADIUS_DEG}"
+  --inner-core-radius-deg "${INNER_CORE_RADIUS_DEG}"
+  --wind-search-radius-deg "${WIND_SEARCH_RADIUS_DEG}"
+)
+
+if [[ -n "${INIT_DATES_FILE}" ]]; then
+  cmd+=(--init-dates-file "${INIT_DATES_FILE}")
+else
+  cmd+=(--init-date "${INIT_DATE}")
+fi
+
+if [[ -n "${OUTPUT_PREFIX}" ]]; then
+  cmd+=(--output-prefix "${OUTPUT_PREFIX}")
+fi
+
+if [[ "${IGNORE_VORTICITY}" == "1" ]]; then
+  cmd+=(--ignore-vorticity)
+fi
+
+if [[ "${MAX_INIT_DATES}" != "0" ]]; then
+  cmd+=(--max-init-dates "${MAX_INIT_DATES}")
+fi
+
+echo "Running: ${cmd[*]}"
+"${cmd[@]}"
+status=$?
+
+echo "Job finished: $(date)"
+echo "Exit status: ${status}"
+exit "${status}"

@@ -183,6 +183,8 @@ Defaults:
 Script:
 - [scripts/calculate_tc_conditioned_ace.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/calculate_tc_conditioned_ace.py)
 - [scripts/calculate_ibtracs_observed_percentiles.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/calculate_ibtracs_observed_percentiles.py)
+- [scripts/calculate_geos_candidate_thresholds.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/calculate_geos_candidate_thresholds.py)
+- [scripts/submit_geos_candidate_thresholds.pbs](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/submit_geos_candidate_thresholds.pbs)
 
 Observed IBTrACS percentile calibration:
 
@@ -200,6 +202,37 @@ This writes `data/obs/ibtracs/ibtracs_observed_percentiles.csv` by default.
 The default basin assignment uses the same latitude/longitude basin boxes as
 the GEOS TC-conditioned ACE script. Use `--basin-method ibtracs_code` to compare
 against the IBTrACS basin-code grouping.
+
+GEOS candidate wind threshold calibration for the currently available
+`20200824/ens1` ATM subset:
+
+```tcsh
+python scripts/calculate_geos_candidate_thresholds.py \
+  --sfc-root /nobackupp27/afahad/project/GEOS-S2S_TC/data \
+  --atm-root /nobackupp17/afahad/GEOSS2S3_atm \
+  --init-date 20200824 \
+  --ens ens1 \
+  --months 09,10,11 \
+  --observed-percentiles data/obs/ibtracs/ibtracs_observed_percentiles.csv \
+  --observed-wind-vars usa_wind
+```
+
+This writes two CSV files under `data/calibration/` by default:
+- `geos_candidate_thresholds_<init>_<ens>.csv`
+- `geos_candidate_thresholds_<init>_<ens>_candidates.csv`
+
+Submit the same calculation to PBS:
+
+```tcsh
+qsub -v INIT_DATE=20200824,ENS=ens1,FORECAST_MONTHS=09,10,11 scripts/submit_geos_candidate_thresholds.pbs
+```
+
+To calibrate over a date list later, pass `INIT_DATES_FILE` and leave
+`INIT_DATE` empty:
+
+```tcsh
+qsub -v INIT_DATE=,INIT_DATES_FILE=/nobackupp27/afahad/project/GEOS-S2S_TC/config/init_dates_late_aug_1991_2024.txt,ENS=ens1,FORECAST_MONTHS=09,10,11 scripts/submit_geos_candidate_thresholds.pbs
+```
 
 Example:
 
