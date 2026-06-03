@@ -5,6 +5,10 @@ GEOS candidate CSV rows are candidate fixes, not tracked storms. The closest
 observed comparison is therefore IBTrACS 6-hour fixes above the observed
 tropical-storm threshold. This script also reports unique IBTrACS storms as
 context, but it does not try to infer GEOS storm tracks from candidate rows.
+
+By default, GEOS basin thresholds are recomputed from the candidate CSVs being
+compared. That keeps the quantile-matching sanity check apples-to-apples when
+multiple cached calibration files exist in the same directory.
 """
 
 from __future__ import annotations
@@ -402,20 +406,17 @@ def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, 
     return fixes, wind_samples
 
 
-def provisional_geos_thresholds(
-    thresholds: dict[str, float],
+def quantile_matched_geos_thresholds(
     geos_candidates: list[GeosCandidate],
     wind_samples: dict[str, list[float]],
     observed_threshold_kt: float,
 ) -> dict[str, float]:
-    out = dict(thresholds)
+    thresholds: dict[str, float] = {}
     values_by_basin: dict[str, list[float]] = defaultdict(list)
     for candidate in geos_candidates:
         values_by_basin[candidate.basin_name].append(candidate.vmax_kt)
 
     for basin_name in BASIN_ORDER:
-        if basin_name in out:
-            continue
         obs_values = np.asarray(wind_samples.get(basin_name, []), dtype="float64")
         geos_values = np.asarray(values_by_basin.get(basin_name, []), dtype="float64")
         obs_values = obs_values[np.isfinite(obs_values)]
@@ -423,7 +424,17 @@ def provisional_geos_thresholds(
         if obs_values.size == 0 or geos_values.size == 0:
             continue
         observed_percentile = 100.0 * float(np.sum(obs_values <= observed_threshold_kt)) / float(obs_values.size)
-        out[basin_name] = float(np.nanpercentile(geos_values, min(100.0, max(0.0, observed_percentile))))
+        thresholds[basin_name] = float(np.nanpercentile(geos_values, min(100.0, max(0.0, observed_percentile))))
+    return thresholds
+
+
+def fill_missing_geos_thresholds(
+    thresholds: dict[str, float],
+    fallback_thresholds: dict[str, float],
+) -> dict[str, float]:
+    out = dict(thresholds)
+    for basin_name, threshold in fallback_thresholds.items():
+        out.setdefault(basin_name, threshold)
     return out
 
 
@@ -588,24 +599,38 @@ def build_percentile_rows(
         if obs_values.size:
             obs_le_count = int(np.sum(obs_values <= observed_threshold_kt))
             obs_ge_count = int(np.sum(obs_values >= observed_threshold_kt))
+            obs_gt_count = int(np.sum(obs_values > observed_threshold_kt))
             obs_percentile_le = obs_le_count / float(obs_values.size)
             obs_exceedance = obs_ge_count / float(obs_values.size)
+            obs_strict_exceedance = obs_gt_count / float(obs_values.size)
         else:
             obs_le_count = 0
             obs_ge_count = 0
+            obs_gt_count = 0
             obs_percentile_le = float("nan")
             obs_exceedance = float("nan")
+            obs_strict_exceedance = float("nan")
 
         if geos_values.size and np.isfinite(threshold):
             geos_le_count = int(np.sum(geos_values <= threshold))
             geos_ge_count = int(np.sum(geos_values >= threshold))
+            geos_gt_count = int(np.sum(geos_values > threshold))
+            geos_eq_count = int(np.sum(np.isclose(geos_values, threshold, rtol=1.0e-10, atol=1.0e-10)))
             geos_percentile_le = geos_le_count / float(geos_values.size)
             geos_exceedance = geos_ge_count / float(geos_values.size)
+            geos_strict_exceedance = geos_gt_count / float(geos_values.size)
+            geos_eq_fraction = geos_eq_count / float(geos_values.size)
+            geos_upper_midrank = geos_strict_exceedance + 0.5 * geos_eq_fraction
         else:
             geos_le_count = 0
             geos_ge_count = 0
+            geos_gt_count = 0
+            geos_eq_count = 0
             geos_percentile_le = float("nan")
             geos_exceedance = float("nan")
+            geos_strict_exceedance = float("nan")
+            geos_eq_fraction = float("nan")
+            geos_upper_midrank = float("nan")
 
         rows.append(
             {
@@ -613,16 +638,29 @@ def build_percentile_rows(
                 "ibtracs_sample_count": int(obs_values.size),
                 "ibtracs_count_le_34kt": obs_le_count,
                 "ibtracs_count_ge_34kt": obs_ge_count,
+                "ibtracs_count_gt_34kt": obs_gt_count,
                 "ibtracs_fraction_le_34kt": obs_percentile_le,
                 "ibtracs_fraction_ge_34kt": obs_exceedance,
+                "ibtracs_fraction_gt_34kt": obs_strict_exceedance,
                 "geos_candidate_count": int(geos_values.size),
                 "geos_threshold_kt": threshold,
                 "geos_count_le_threshold": geos_le_count,
                 "geos_count_ge_threshold": geos_ge_count,
+                "geos_count_gt_threshold": geos_gt_count,
+                "geos_count_eq_threshold": geos_eq_count,
                 "geos_fraction_le_threshold": geos_percentile_le,
                 "geos_fraction_ge_threshold": geos_exceedance,
+                "geos_fraction_gt_threshold": geos_strict_exceedance,
+                "geos_fraction_eq_threshold": geos_eq_fraction,
+                "geos_fraction_upper_midrank": geos_upper_midrank,
                 "fraction_ge_difference": geos_exceedance - obs_exceedance
                 if np.isfinite(geos_exceedance) and np.isfinite(obs_exceedance)
+                else float("nan"),
+                "fraction_gt_difference": geos_strict_exceedance - obs_strict_exceedance
+                if np.isfinite(geos_strict_exceedance) and np.isfinite(obs_strict_exceedance)
+                else float("nan"),
+                "fraction_midrank_difference": geos_upper_midrank - obs_strict_exceedance
+                if np.isfinite(geos_upper_midrank) and np.isfinite(obs_strict_exceedance)
                 else float("nan"),
             }
         )
@@ -700,20 +738,20 @@ def plot_percentile_sanity(rows: list[dict[str, object]], path: Path, dpi: int) 
     x = np.arange(len(BASIN_ORDER))
     width = 0.35
     obs = np.asarray(
-        [next(row for row in rows if row["basin_name"] == basin)["ibtracs_fraction_ge_34kt"] for basin in BASIN_ORDER],
+        [next(row for row in rows if row["basin_name"] == basin)["ibtracs_fraction_gt_34kt"] for basin in BASIN_ORDER],
         dtype="float64",
     )
     geos = np.asarray(
-        [next(row for row in rows if row["basin_name"] == basin)["geos_fraction_ge_threshold"] for basin in BASIN_ORDER],
+        [next(row for row in rows if row["basin_name"] == basin)["geos_fraction_upper_midrank"] for basin in BASIN_ORDER],
         dtype="float64",
     )
-    ax.bar(x - width / 2, obs, width, color="#344e86", label="IBTrACS fraction >= 34 kt")
-    ax.bar(x + width / 2, geos, width, color="#e55934", label="GEOS fraction >= calibrated threshold")
+    ax.bar(x - width / 2, obs, width, color="#344e86", label="IBTrACS fraction > 34 kt")
+    ax.bar(x + width / 2, geos, width, color="#e55934", label="GEOS upper-tail mid-rank at threshold")
     for x_value, basin_name in zip(x, BASIN_ORDER):
         row = next(item for item in rows if item["basin_name"] == basin_name)
         threshold = float(row["geos_threshold_kt"])
-        obs_fraction = float(row["ibtracs_fraction_ge_34kt"])
-        geos_fraction = float(row["geos_fraction_ge_threshold"])
+        obs_fraction = float(row["ibtracs_fraction_gt_34kt"])
+        geos_fraction = float(row["geos_fraction_upper_midrank"])
         if np.isfinite(threshold) and np.isfinite(obs_fraction) and np.isfinite(geos_fraction):
             ax.text(
                 x_value,
@@ -730,7 +768,7 @@ def plot_percentile_sanity(rows: list[dict[str, object]], path: Path, dpi: int) 
     ymax = float(np.nanmax(finite_values)) if finite_values.size else 0.2
     ax.set_ylim(0.0, min(1.05, max(0.2, ymax + 0.12)))
     ax.set_ylabel("Fraction of Samples")
-    ax.set_title("Percentile Sanity Check: Observed 34 kt vs GEOS Basin Threshold", fontsize=12, fontweight="bold", pad=10)
+    ax.set_title("Quantile-Matching Sanity Check: Observed 34 kt vs GEOS Basin Threshold", fontsize=12, fontweight="bold", pad=10)
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -801,14 +839,14 @@ def print_summary(rows: list[dict[str, object]]) -> None:
 
 def print_percentile_summary(rows: list[dict[str, object]]) -> None:
     print("")
-    print("Percentile sanity check")
-    print(f"{'basin':20s} {'IB >=34':>10s} {'GEOS >=T':>10s} {'diff':>10s} {'T_geos':>8s}")
+    print("Quantile-matching sanity check")
+    print(f"{'basin':20s} {'IB >34':>10s} {'GEOS mid':>10s} {'diff':>10s} {'T_geos':>8s}")
     for row in rows:
         print(
             f"{str(row['basin_name']):20s} "
-            f"{float(row['ibtracs_fraction_ge_34kt']):10.3f} "
-            f"{float(row['geos_fraction_ge_threshold']):10.3f} "
-            f"{float(row['fraction_ge_difference']):10.3f} "
+            f"{float(row['ibtracs_fraction_gt_34kt']):10.3f} "
+            f"{float(row['geos_fraction_upper_midrank']):10.3f} "
+            f"{float(row['fraction_midrank_difference']):10.3f} "
             f"{float(row['geos_threshold_kt']):8.2f}"
         )
 
@@ -816,7 +854,13 @@ def print_percentile_summary(rows: list[dict[str, object]]) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidates", nargs="*", default=[DEFAULT_CANDIDATES])
-    parser.add_argument("--thresholds", nargs="*", default=None, help="Optional GEOS threshold CSV path(s). Default: infer from candidates.")
+    parser.add_argument("--thresholds", nargs="*", default=None, help="Optional GEOS threshold CSV path(s), used with --threshold-source csv.")
+    parser.add_argument(
+        "--threshold-source",
+        choices=("recompute", "csv"),
+        default="recompute",
+        help="Use thresholds recomputed from the current candidate CSVs, or read threshold CSVs. Default: recompute.",
+    )
     parser.add_argument("--ibtracs", default=DEFAULT_IBTRACS)
     parser.add_argument("--start-year", type=int, default=1991)
     parser.add_argument("--end-year", type=int, default=2024)
@@ -853,24 +897,30 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Loaded {len(all_geos_candidates):,} GEOS candidate rows in selected years/months.")
     print(f"Using {len(geos_candidates):,} GEOS candidate rows after latitude filter {args.min_lat:.1f} to {args.max_lat:.1f}.")
 
-    if args.thresholds is None:
-        threshold_paths = infer_threshold_paths(candidate_paths)
-    else:
-        threshold_paths = expand_paths(args.thresholds)
-    if threshold_paths:
-        print("Reading GEOS threshold CSV files:")
-        for path in threshold_paths:
-            print(f"  - {path}")
-    geos_thresholds = read_thresholds(threshold_paths, args.wind_var, args.basin_method)
-
     print(f"Reading IBTrACS: {args.ibtracs}")
     ibtracs_fixes, wind_samples = read_ibtracs(args)
-    geos_thresholds = provisional_geos_thresholds(
-        geos_thresholds,
+
+    recomputed_thresholds = quantile_matched_geos_thresholds(
         all_geos_candidates,
         wind_samples,
         args.threshold_kt,
     )
+    if args.threshold_source == "csv":
+        if args.thresholds is None:
+            threshold_paths = infer_threshold_paths(candidate_paths)
+        else:
+            threshold_paths = expand_paths(args.thresholds)
+        if threshold_paths:
+            print("Reading GEOS threshold CSV files:")
+            for path in threshold_paths:
+                print(f"  - {path}")
+        geos_thresholds = read_thresholds(threshold_paths, args.wind_var, args.basin_method)
+        geos_thresholds = fill_missing_geos_thresholds(geos_thresholds, recomputed_thresholds)
+        print("Using GEOS thresholds from CSV where available; recomputed thresholds fill missing basins.")
+    else:
+        geos_thresholds = recomputed_thresholds
+        print("Using GEOS thresholds recomputed from the current candidate CSVs for this comparison.")
+
     missing_thresholds = [basin_name for basin_name in BASIN_ORDER if basin_name not in geos_thresholds]
     if missing_thresholds:
         print(f"WARNING: missing GEOS thresholds for: {', '.join(missing_thresholds)}")
