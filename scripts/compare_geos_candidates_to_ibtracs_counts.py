@@ -103,6 +103,13 @@ MONTH_LABELS = {
 }
 
 
+def format_months_label(months_text: str) -> str:
+    months = sorted(parse_months(months_text))
+    if not months:
+        return "all months"
+    return "+".join(MONTH_LABELS.get(month, month) for month in months)
+
+
 @dataclass
 class GeosCandidate:
     init_date: str
@@ -453,6 +460,10 @@ def safe_member_mean(count: int, year: int, members_by_year: dict[int, set[tuple
     return float(count) / float(denominator)
 
 
+def year_has_geos_coverage(row: dict[str, object]) -> bool:
+    return int(row["expected_members_per_year"]) > 0 or int(row["active_init_member_pairs"]) > 0
+
+
 def build_yearly_rows(
     geos_candidates: list[GeosCandidate],
     ibtracs_fixes: list[IbtracsFix],
@@ -516,18 +527,23 @@ def build_monthly_rows(
 
     for month in months:
         for basin_name in BASIN_ORDER:
-            obs_year_counts: list[float] = []
-            obs_storm_year_counts: list[float] = []
+            obs_all_year_counts: list[float] = []
+            obs_all_storm_year_counts: list[float] = []
+            obs_comparison_year_counts: list[float] = []
+            obs_comparison_storm_year_counts: list[float] = []
             geos_struct_year_means: list[float] = []
             geos_ts_year_means: list[float] = []
+            comparison_years: list[int] = []
             for year in years:
                 obs_fixes = [
                     fix
                     for fix in ibtracs_fixes
                     if fix.year == year and fix.month == month and fix.basin_name == basin_name
                 ]
-                obs_year_counts.append(float(len(obs_fixes)))
-                obs_storm_year_counts.append(float(len({fix.sid for fix in obs_fixes})))
+                obs_count = float(len(obs_fixes))
+                obs_storm_count = float(len({fix.sid for fix in obs_fixes}))
+                obs_all_year_counts.append(obs_count)
+                obs_all_storm_year_counts.append(obs_storm_count)
                 geos_basin = [
                     candidate
                     for candidate in geos_candidates
@@ -535,17 +551,27 @@ def build_monthly_rows(
                 ]
                 threshold = geos_thresholds.get(basin_name, float("nan"))
                 geos_ts_count = sum(1 for candidate in geos_basin if np.isfinite(threshold) and candidate.vmax_kt >= threshold)
-                geos_struct_year_means.append(safe_member_mean(len(geos_basin), year, members_by_year, args.expected_members_per_year))
-                geos_ts_year_means.append(safe_member_mean(geos_ts_count, year, members_by_year, args.expected_members_per_year))
+                geos_struct_mean = safe_member_mean(len(geos_basin), year, members_by_year, args.expected_members_per_year)
+                geos_ts_mean = safe_member_mean(geos_ts_count, year, members_by_year, args.expected_members_per_year)
+                if np.isfinite(geos_struct_mean):
+                    comparison_years.append(year)
+                    obs_comparison_year_counts.append(obs_count)
+                    obs_comparison_storm_year_counts.append(obs_storm_count)
+                    geos_struct_year_means.append(geos_struct_mean)
+                    geos_ts_year_means.append(geos_ts_mean)
 
             rows.append(
                 {
                     "month": month,
                     "basin_name": basin_name,
-                    "ibtracs_fix_year_mean": float(np.nanmean(obs_year_counts)),
-                    "ibtracs_storm_year_mean": float(np.nanmean(obs_storm_year_counts)),
-                    "geos_structural_member_year_mean": float(np.nanmean(geos_struct_year_means)),
-                    "geos_ts_equiv_member_year_mean": float(np.nanmean(geos_ts_year_means)),
+                    "comparison_year_count": len(comparison_years),
+                    "comparison_years": ",".join(str(year) for year in comparison_years),
+                    "ibtracs_fix_year_mean": float(np.nanmean(obs_comparison_year_counts)) if obs_comparison_year_counts else float("nan"),
+                    "ibtracs_storm_year_mean": float(np.nanmean(obs_comparison_storm_year_counts)) if obs_comparison_storm_year_counts else float("nan"),
+                    "ibtracs_fix_year_mean_all_years": float(np.nanmean(obs_all_year_counts)),
+                    "ibtracs_storm_year_mean_all_years": float(np.nanmean(obs_all_storm_year_counts)),
+                    "geos_structural_member_year_mean": float(np.nanmean(geos_struct_year_means)) if geos_struct_year_means else float("nan"),
+                    "geos_ts_equiv_member_year_mean": float(np.nanmean(geos_ts_year_means)) if geos_ts_year_means else float("nan"),
                 }
             )
     return rows
@@ -555,21 +581,30 @@ def build_summary_rows(yearly_rows: list[dict[str, object]]) -> list[dict[str, o
     rows: list[dict[str, object]] = []
     for basin_name in BASIN_ORDER:
         basin_rows = [row for row in yearly_rows if row["basin_name"] == basin_name]
-        obs_fix_values = np.asarray([row["ibtracs_fix_count"] for row in basin_rows], dtype="float64")
-        obs_storm_values = np.asarray([row["ibtracs_storm_count"] for row in basin_rows], dtype="float64")
-        geos_struct_values = np.asarray([row["geos_structural_member_mean_count"] for row in basin_rows], dtype="float64")
-        geos_ts_values = np.asarray([row["geos_ts_equiv_member_mean_count"] for row in basin_rows], dtype="float64")
+        comparison_rows = [row for row in basin_rows if year_has_geos_coverage(row)]
+        obs_fix_all_values = np.asarray([row["ibtracs_fix_count"] for row in basin_rows], dtype="float64")
+        obs_storm_all_values = np.asarray([row["ibtracs_storm_count"] for row in basin_rows], dtype="float64")
+        obs_fix_values = np.asarray([row["ibtracs_fix_count"] for row in comparison_rows], dtype="float64")
+        obs_storm_values = np.asarray([row["ibtracs_storm_count"] for row in comparison_rows], dtype="float64")
+        geos_struct_values = np.asarray([row["geos_structural_member_mean_count"] for row in comparison_rows], dtype="float64")
+        geos_ts_values = np.asarray([row["geos_ts_equiv_member_mean_count"] for row in comparison_rows], dtype="float64")
         geos_thresholds = [float(row["geos_threshold_kt"]) for row in basin_rows if np.isfinite(float(row["geos_threshold_kt"]))]
-        obs_fix_mean = float(np.nanmean(obs_fix_values))
-        geos_ts_mean = float(np.nanmean(geos_ts_values))
+        obs_fix_mean = float(np.nanmean(obs_fix_values)) if obs_fix_values.size else float("nan")
+        geos_ts_mean = float(np.nanmean(geos_ts_values)) if geos_ts_values.size else float("nan")
         rows.append(
             {
                 "basin_name": basin_name,
-                "ibtracs_fix_total": int(np.nansum(obs_fix_values)),
-                "ibtracs_storm_total": int(np.nansum(obs_storm_values)),
+                "comparison_year_count": len(comparison_rows),
+                "comparison_years": ",".join(str(row["year"]) for row in comparison_rows),
+                "ibtracs_fix_total": int(np.nansum(obs_fix_values)) if obs_fix_values.size else 0,
+                "ibtracs_storm_total": int(np.nansum(obs_storm_values)) if obs_storm_values.size else 0,
+                "ibtracs_fix_total_all_years": int(np.nansum(obs_fix_all_values)),
+                "ibtracs_storm_total_all_years": int(np.nansum(obs_storm_all_values)),
                 "ibtracs_fix_year_mean": obs_fix_mean,
-                "ibtracs_storm_year_mean": float(np.nanmean(obs_storm_values)),
-                "geos_structural_member_year_mean": float(np.nanmean(geos_struct_values)),
+                "ibtracs_storm_year_mean": float(np.nanmean(obs_storm_values)) if obs_storm_values.size else float("nan"),
+                "ibtracs_fix_year_mean_all_years": float(np.nanmean(obs_fix_all_values)),
+                "ibtracs_storm_year_mean_all_years": float(np.nanmean(obs_storm_all_values)),
+                "geos_structural_member_year_mean": float(np.nanmean(geos_struct_values)) if geos_struct_values.size else float("nan"),
                 "geos_ts_equiv_member_year_mean": geos_ts_mean,
                 "geos_to_ibtracs_fix_ratio": geos_ts_mean / obs_fix_mean if obs_fix_mean > 0 else float("nan"),
                 "geos_threshold_kt": geos_thresholds[0] if geos_thresholds else float("nan"),
@@ -695,7 +730,7 @@ def save_figure(fig, path: Path, dpi: int) -> None:
     print(f"  -> Saved {path}")
 
 
-def plot_basin_summary(rows: list[dict[str, object]], path: Path, dpi: int) -> None:
+def plot_basin_summary(rows: list[dict[str, object]], path: Path, dpi: int, months_label: str) -> None:
     fig, ax = plt.subplots(figsize=(12, 5.8), dpi=dpi)
     x = np.arange(len(BASIN_ORDER))
     width = 0.26
@@ -709,7 +744,7 @@ def plot_basin_summary(rows: list[dict[str, object]], path: Path, dpi: int) -> N
     ax.set_xticks(x)
     ax.set_xticklabels(BASIN_ORDER, rotation=20, ha="right")
     ax.set_ylabel("Count")
-    ax.set_title("GEOS Candidate Counts vs IBTrACS Tropical-Storm Fix Counts", fontsize=12, fontweight="bold", pad=10)
+    ax.set_title(f"GEOS Candidate Counts vs IBTrACS Tropical-Storm Fix Counts ({months_label})", fontsize=12, fontweight="bold", pad=10)
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -717,7 +752,7 @@ def plot_basin_summary(rows: list[dict[str, object]], path: Path, dpi: int) -> N
     save_figure(fig, path, dpi)
 
 
-def plot_ratio(rows: list[dict[str, object]], path: Path, dpi: int) -> None:
+def plot_ratio(rows: list[dict[str, object]], path: Path, dpi: int, months_label: str) -> None:
     fig, ax = plt.subplots(figsize=(10.5, 4.8), dpi=dpi)
     ratios = np.asarray([next(row for row in rows if row["basin_name"] == basin)["geos_to_ibtracs_fix_ratio"] for basin in BASIN_ORDER], dtype="float64")
     colors = [BASINS[basin]["color"] for basin in BASIN_ORDER]
@@ -726,14 +761,14 @@ def plot_ratio(rows: list[dict[str, object]], path: Path, dpi: int) -> None:
     ax.set_xticks(np.arange(len(BASIN_ORDER)))
     ax.set_xticklabels(BASIN_ORDER, rotation=20, ha="right")
     ax.set_ylabel("GEOS TS-equiv / IBTrACS TS fixes")
-    ax.set_title("GEOS-to-IBTrACS Count Ratio by Basin", fontsize=12, fontweight="bold", pad=10)
+    ax.set_title(f"GEOS-to-IBTrACS Count Ratio by Basin ({months_label})", fontsize=12, fontweight="bold", pad=10)
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     save_figure(fig, path, dpi)
 
 
-def plot_percentile_sanity(rows: list[dict[str, object]], path: Path, dpi: int) -> None:
+def plot_percentile_sanity(rows: list[dict[str, object]], path: Path, dpi: int, months_label: str) -> None:
     fig, ax = plt.subplots(figsize=(12, 5.6), dpi=dpi)
     x = np.arange(len(BASIN_ORDER))
     width = 0.35
@@ -768,7 +803,7 @@ def plot_percentile_sanity(rows: list[dict[str, object]], path: Path, dpi: int) 
     ymax = float(np.nanmax(finite_values)) if finite_values.size else 0.2
     ax.set_ylim(0.0, min(1.05, max(0.2, ymax + 0.12)))
     ax.set_ylabel("Fraction of Samples")
-    ax.set_title("Quantile-Matching Sanity Check: Observed 34 kt vs GEOS Basin Threshold", fontsize=12, fontweight="bold", pad=10)
+    ax.set_title(f"Quantile-Matching Sanity Check: Observed 34 kt vs GEOS Basin Threshold ({months_label})", fontsize=12, fontweight="bold", pad=10)
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -776,7 +811,7 @@ def plot_percentile_sanity(rows: list[dict[str, object]], path: Path, dpi: int) 
     save_figure(fig, path, dpi)
 
 
-def plot_yearly_panels(yearly_rows: list[dict[str, object]], path: Path, dpi: int) -> None:
+def plot_yearly_panels(yearly_rows: list[dict[str, object]], path: Path, dpi: int, months_label: str) -> None:
     years = sorted({int(row["year"]) for row in yearly_rows})
     fig, axes = plt.subplots(2, 3, figsize=(14, 7.5), dpi=dpi, sharex=True)
     for ax, basin_name in zip(axes.ravel(), BASIN_ORDER):
@@ -790,12 +825,12 @@ def plot_yearly_panels(yearly_rows: list[dict[str, object]], path: Path, dpi: in
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
     axes[0, 0].legend(frameon=False, fontsize=8)
-    fig.suptitle("Yearly GEOS Candidate Counts vs IBTrACS TS Fix Counts", fontsize=13, fontweight="bold", y=0.99)
+    fig.suptitle(f"Yearly {months_label} GEOS Candidate Counts vs IBTrACS TS Fix Counts", fontsize=13, fontweight="bold", y=0.99)
     fig.tight_layout()
     save_figure(fig, path, dpi)
 
 
-def plot_monthly_summary(rows: list[dict[str, object]], path: Path, dpi: int) -> None:
+def plot_monthly_summary(rows: list[dict[str, object]], path: Path, dpi: int, months_label: str) -> None:
     months = sorted({row["month"] for row in rows})
     fig, axes = plt.subplots(1, max(1, len(months)), figsize=(7 * max(1, len(months)), 5.5), dpi=dpi, sharey=True)
     if len(months) == 1:
@@ -818,7 +853,7 @@ def plot_monthly_summary(rows: list[dict[str, object]], path: Path, dpi: int) ->
         ax.spines["right"].set_visible(False)
     axes[0].set_ylabel("Mean Count per Year")
     axes[0].legend(frameon=False)
-    fig.suptitle("Monthly Count Comparison", fontsize=13, fontweight="bold", y=0.99)
+    fig.suptitle(f"Monthly Count Comparison ({months_label})", fontsize=13, fontweight="bold", y=0.99)
     fig.tight_layout()
     save_figure(fig, path, dpi)
 
@@ -932,16 +967,17 @@ def main(argv: list[str] | None = None) -> int:
 
     output_dir = Path(args.output_dir)
     plot_dir = Path(args.plot_dir)
+    months_label = format_months_label(args.months)
     write_csv(output_dir / f"{args.prefix}_yearly.csv", yearly_rows)
     write_csv(output_dir / f"{args.prefix}_monthly.csv", monthly_rows)
     write_csv(output_dir / f"{args.prefix}_summary.csv", summary_rows)
     write_csv(output_dir / f"{args.prefix}_percentile_sanity.csv", percentile_rows)
 
-    plot_basin_summary(summary_rows, plot_dir / f"{args.prefix}_basin_mean_counts.png", args.dpi)
-    plot_ratio(summary_rows, plot_dir / f"{args.prefix}_geos_to_ibtracs_ratio.png", args.dpi)
-    plot_percentile_sanity(percentile_rows, plot_dir / f"{args.prefix}_percentile_sanity.png", args.dpi)
-    plot_yearly_panels(yearly_rows, plot_dir / f"{args.prefix}_yearly_counts_by_basin.png", args.dpi)
-    plot_monthly_summary(monthly_rows, plot_dir / f"{args.prefix}_monthly_counts.png", args.dpi)
+    plot_basin_summary(summary_rows, plot_dir / f"{args.prefix}_basin_mean_counts.png", args.dpi, months_label)
+    plot_ratio(summary_rows, plot_dir / f"{args.prefix}_geos_to_ibtracs_ratio.png", args.dpi, months_label)
+    plot_percentile_sanity(percentile_rows, plot_dir / f"{args.prefix}_percentile_sanity.png", args.dpi, months_label)
+    plot_yearly_panels(yearly_rows, plot_dir / f"{args.prefix}_yearly_counts_by_basin.png", args.dpi, months_label)
+    plot_monthly_summary(monthly_rows, plot_dir / f"{args.prefix}_monthly_counts.png", args.dpi, months_label)
 
     print_summary(summary_rows)
     print_percentile_summary(percentile_rows)
