@@ -31,6 +31,17 @@ from pathlib import Path
 
 import numpy as np
 
+
+def configure_line_buffered_streams() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True, write_through=True)
+        except (AttributeError, TypeError):
+            pass
+
+
+configure_line_buffered_streams()
+
 try:
     import netCDF4
 except ImportError:
@@ -244,6 +255,8 @@ def write_candidates_header(handle) -> csv.DictWriter:
     ]
     writer = csv.DictWriter(handle, fieldnames=fieldnames)
     writer.writeheader()
+    handle.flush()
+    writer._flush_handle = handle
     return writer
 
 
@@ -272,6 +285,9 @@ def write_candidate(writer: csv.DictWriter, row: CandidateRow) -> None:
             "used_vorticity": row.used_vorticity,
         }
     )
+    flush_handle = getattr(writer, "_flush_handle", None)
+    if flush_handle is not None:
+        flush_handle.flush()
 
 
 def collect_candidates_for_member(
@@ -666,6 +682,10 @@ def main(argv: list[str] | None = None) -> int:
 
     candidates_path = output_dir / f"{prefix}_candidates.csv"
     thresholds_path = output_dir / f"{prefix}.csv"
+    print(f"Selected init dates: {len(init_dates)} ({init_dates[0]} to {init_dates[-1]})", flush=True)
+    print(f"Selected months: {','.join(sorted(forecast_months))}", flush=True)
+    print(f"Candidate inventory will be written to: {candidates_path}", flush=True)
+    print(f"Threshold summary will be written to: {thresholds_path}", flush=True)
 
     geos_vmax_by_basin: dict[str, list[float]] = {basin_name: [] for basin_name in BASINS}
     basin_stats: dict[str, dict[str, int]] = {
@@ -674,7 +694,7 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     resolved_ensembles: list[str] = []
-    with candidates_path.open("w", newline="") as handle:
+    with candidates_path.open("w", newline="", buffering=1) as handle:
         candidate_writer = write_candidates_header(handle)
         for init_date in init_dates:
             ensembles = discover_ensembles(

@@ -145,6 +145,7 @@ echo "CONDA_BASE=${CONDA_BASE:-auto}"
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/matplotlib-${PBS_JOBID:-geos_tc_thresh}"
+export PYTHONUNBUFFERED=1
 mkdir -p "${MPLCONFIGDIR}"
 
 if ! activate_conda_env; then
@@ -162,7 +163,8 @@ fi
 
 echo "ACTIVE_CONDA_PREFIX=${CONDA_PREFIX:-}"
 echo "PYTHON_BIN=${PYTHON_BIN}"
-"${PYTHON_BIN}" - <<'PY'
+echo "PYTHONUNBUFFERED=${PYTHONUNBUFFERED}"
+"${PYTHON_BIN}" -u - <<'PY'
 import netCDF4
 import numpy
 print("Python dependency check passed: netCDF4 and numpy are available")
@@ -174,7 +176,7 @@ if (( dep_status != 0 )); then
 fi
 
 cmd=(
-  "${PYTHON_BIN}" scripts/calculate_geos_candidate_thresholds.py
+  "${PYTHON_BIN}" -u scripts/calculate_geos_candidate_thresholds.py
   --sfc-root "${SFC_ROOT}"
   --atm-root "${ATM_ROOT}"
   --sfc-collection "${SFC_COLLECTION}"
