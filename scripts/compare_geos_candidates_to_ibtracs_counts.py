@@ -475,8 +475,12 @@ def active_members_by_year(candidates: list[GeosCandidate]) -> dict[int, set[tup
     return members
 
 
+def member_denominator(year: int, members_by_year: dict[int, set[tuple[str, str]]], expected_members: int) -> int:
+    return expected_members if expected_members > 0 else len(members_by_year.get(year, set()))
+
+
 def safe_member_mean(count: int, year: int, members_by_year: dict[int, set[tuple[str, str]]], expected_members: int) -> float:
-    denominator = expected_members if expected_members > 0 else len(members_by_year.get(year, set()))
+    denominator = member_denominator(year, members_by_year, expected_members)
     if denominator <= 0:
         return float("nan")
     return float(count) / float(denominator)
@@ -674,6 +678,99 @@ def build_summary_rows(yearly_rows: list[dict[str, object]]) -> list[dict[str, o
     return rows
 
 
+def best_weighted_upper_threshold(values: list[float], weights: list[float], target_mean: float) -> tuple[float, float, float]:
+    value_array = np.asarray(values, dtype="float64")
+    weight_array = np.asarray(weights, dtype="float64")
+    mask = np.isfinite(value_array) & np.isfinite(weight_array) & (weight_array > 0.0)
+    value_array = value_array[mask]
+    weight_array = weight_array[mask]
+    if value_array.size == 0 or not np.isfinite(target_mean):
+        return float("nan"), float("nan"), float("nan")
+
+    order = np.argsort(value_array)[::-1]
+    value_array = value_array[order]
+    weight_array = weight_array[order]
+
+    best_threshold = float(np.nanmax(value_array) + 1.0e-6)
+    best_mean = 0.0
+    best_error = abs(target_mean)
+    cumulative = 0.0
+    start = 0
+    for end in np.r_[np.nonzero(np.diff(value_array))[0] + 1, value_array.size]:
+        threshold = float(value_array[start])
+        cumulative += float(np.sum(weight_array[start:end]))
+        error = abs(cumulative - target_mean)
+        if error < best_error:
+            best_threshold = threshold
+            best_mean = cumulative
+            best_error = error
+        start = int(end)
+    return best_threshold, best_mean, best_error
+
+
+def count_matched_geos_thresholds(
+    geos_candidates: list[GeosCandidate],
+    ibtracs_fixes: list[IbtracsFix],
+    args: argparse.Namespace,
+) -> tuple[dict[str, float], list[dict[str, object]]]:
+    years = list(range(args.start_year, args.end_year + 1))
+    members_by_year = active_members_by_year(geos_candidates)
+    thresholds: dict[str, float] = {}
+    rows: list[dict[str, object]] = []
+
+    for basin_name in BASIN_ORDER:
+        comparison_years: list[int] = []
+        obs_counts: list[float] = []
+        values: list[float] = []
+        raw_weights: list[float] = []
+
+        for year in years:
+            denominator = member_denominator(year, members_by_year, args.expected_members_per_year)
+            if denominator <= 0:
+                continue
+            comparison_years.append(year)
+            obs_fixes = [fix for fix in ibtracs_fixes if fix.year == year and fix.basin_name == basin_name]
+            obs_counts.append(float(ibtracs_count_for_metric(obs_fixes, args.observed_count_metric)))
+            for candidate in geos_candidates:
+                if candidate.year == year and candidate.basin_name == basin_name and np.isfinite(candidate.vmax_kt):
+                    values.append(candidate.vmax_kt)
+                    raw_weights.append(1.0 / float(denominator))
+
+        year_count = len(comparison_years)
+        if year_count > 0 and raw_weights:
+            weights = [weight / float(year_count) for weight in raw_weights]
+            structural_mean = float(np.sum(weights))
+        else:
+            weights = []
+            structural_mean = float("nan")
+
+        obs_mean = float(np.nanmean(obs_counts)) if obs_counts else float("nan")
+        threshold, matched_mean, match_error = best_weighted_upper_threshold(values, weights, obs_mean)
+        if np.isfinite(threshold):
+            thresholds[basin_name] = threshold
+
+        possible = bool(np.isfinite(obs_mean) and np.isfinite(structural_mean) and obs_mean <= structural_mean + 1.0e-9)
+        rows.append(
+            {
+                "basin_name": basin_name,
+                "ibtracs_count_metric": args.observed_count_metric,
+                "comparison_year_count": year_count,
+                "comparison_years": ",".join(str(year) for year in comparison_years),
+                "ibtracs_count_year_mean": obs_mean,
+                "geos_structural_member_year_mean": structural_mean,
+                "geos_structural_to_ibtracs_count_ratio": structural_mean / obs_mean if np.isfinite(obs_mean) and obs_mean > 0 else float("nan"),
+                "count_match_possible": int(possible),
+                "count_match_threshold_kt": threshold,
+                "count_match_geos_member_year_mean": matched_mean,
+                "count_match_ratio": matched_mean / obs_mean if np.isfinite(obs_mean) and obs_mean > 0 else float("nan"),
+                "count_match_abs_error": match_error,
+                "geos_candidate_count": len(values),
+            }
+        )
+
+    return thresholds, rows
+
+
 def build_percentile_rows(
     geos_candidates: list[GeosCandidate],
     wind_samples: dict[str, list[float]],
@@ -864,7 +961,7 @@ def plot_percentile_sanity(rows: list[dict[str, object]], path: Path, dpi: int, 
     ymax = float(np.nanmax(finite_values)) if finite_values.size else 0.2
     ax.set_ylim(0.0, min(1.05, max(0.2, ymax + 0.12)))
     ax.set_ylabel("Fraction of Samples")
-    ax.set_title(f"Quantile-Matching Sanity Check: Observed 34 kt vs GEOS Basin Threshold ({months_label})", fontsize=12, fontweight="bold", pad=10)
+    ax.set_title(f"Intensity-Tail Check: Observed 34 kt vs GEOS Basin Threshold ({months_label})", fontsize=12, fontweight="bold", pad=10)
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -936,7 +1033,7 @@ def print_summary(rows: list[dict[str, object]], observed_label: str) -> None:
 
 def print_percentile_summary(rows: list[dict[str, object]]) -> None:
     print("")
-    print("Quantile-matching sanity check")
+    print("Intensity-threshold sanity check")
     print(f"{'basin':20s} {'IB >34':>10s} {'GEOS mid':>10s} {'diff':>10s} {'T_geos':>8s}")
     for row in rows:
         print(
@@ -948,15 +1045,34 @@ def print_percentile_summary(rows: list[dict[str, object]]) -> None:
         )
 
 
+def print_count_calibration(rows: list[dict[str, object]]) -> None:
+    print("")
+    print("Count-matched threshold diagnostic")
+    print(f"{'basin':20s} {'IB count/yr':>12s} {'struct/yr':>10s} {'possible':>8s} {'T_count':>8s} {'matched/yr':>10s}")
+    for row in rows:
+        possible = "yes" if int(row["count_match_possible"]) else "no"
+        print(
+            f"{str(row['basin_name']):20s} "
+            f"{float(row['ibtracs_count_year_mean']):12.2f} "
+            f"{float(row['geos_structural_member_year_mean']):10.2f} "
+            f"{possible:>8s} "
+            f"{float(row['count_match_threshold_kt']):8.2f} "
+            f"{float(row['count_match_geos_member_year_mean']):10.2f}"
+        )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidates", nargs="*", default=[DEFAULT_CANDIDATES])
     parser.add_argument("--thresholds", nargs="*", default=None, help="Optional GEOS threshold CSV path(s), used with --threshold-source csv.")
     parser.add_argument(
         "--threshold-source",
-        choices=("recompute", "csv"),
+        choices=("recompute", "csv", "count_match"),
         default="recompute",
-        help="Use thresholds recomputed from the current candidate CSVs, or read threshold CSVs. Default: recompute.",
+        help=(
+            "Use intensity quantile thresholds recomputed from the current candidate CSVs, "
+            "read threshold CSVs, or compute thresholds that best match observed counts. Default: recompute."
+        ),
     )
     parser.add_argument("--ibtracs", default=DEFAULT_IBTRACS)
     parser.add_argument("--start-year", type=int, default=1991)
@@ -1008,7 +1124,11 @@ def main(argv: list[str] | None = None) -> int:
         wind_samples,
         args.threshold_kt,
     )
-    if args.threshold_source == "csv":
+    count_match_thresholds, count_calibration_rows = count_matched_geos_thresholds(geos_candidates, ibtracs_fixes, args)
+    if args.threshold_source == "count_match":
+        geos_thresholds = count_match_thresholds
+        print("Using GEOS thresholds that best match the selected observed count metric.")
+    elif args.threshold_source == "csv":
         if args.thresholds is None:
             threshold_paths = infer_threshold_paths(candidate_paths)
         else:
@@ -1042,6 +1162,7 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(output_dir / f"{args.prefix}_monthly.csv", monthly_rows)
     write_csv(output_dir / f"{args.prefix}_summary.csv", summary_rows)
     write_csv(output_dir / f"{args.prefix}_percentile_sanity.csv", percentile_rows)
+    write_csv(output_dir / f"{args.prefix}_count_calibration.csv", count_calibration_rows)
 
     plot_basin_summary(summary_rows, plot_dir / f"{args.prefix}_basin_mean_counts.png", args.dpi, months_label, observed_label, observed_title)
     plot_ratio(summary_rows, plot_dir / f"{args.prefix}_geos_to_ibtracs_ratio.png", args.dpi, months_label, observed_title)
@@ -1051,6 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print_summary(summary_rows, observed_label)
     print_percentile_summary(percentile_rows)
+    print_count_calibration(count_calibration_rows)
     if args.expected_members_per_year <= 0:
         print("")
         print("NOTE: GEOS member means use active init/member pairs visible in the candidate CSV.")
