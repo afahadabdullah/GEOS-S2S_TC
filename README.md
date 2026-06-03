@@ -182,6 +182,24 @@ Defaults:
 
 Script:
 - [scripts/calculate_tc_conditioned_ace.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/calculate_tc_conditioned_ace.py)
+- [scripts/calculate_ibtracs_observed_percentiles.py](/Users/afahad/Library/CloudStorage/OneDrive-GeorgeMasonUniversity/MacMini/Projects/GEOS-S2S_TC/scripts/calculate_ibtracs_observed_percentiles.py)
+
+Observed IBTrACS percentile calibration:
+
+```tcsh
+python scripts/calculate_ibtracs_observed_percentiles.py \
+  --ibtracs data/obs/ibtracs/IBTrACS.since1980.v04r01.nc \
+  --start-year 1991 \
+  --end-year 2024 \
+  --months 9,10,11 \
+  --threshold-kt 34 \
+  --wind-vars wmo_wind,usa_wind
+```
+
+This writes `data/obs/ibtracs/ibtracs_observed_percentiles.csv` by default.
+The default basin assignment uses the same latitude/longitude basin boxes as
+the GEOS TC-conditioned ACE script. Use `--basin-method ibtracs_code` to compare
+against the IBTrACS basin-code grouping.
 
 Example:
 
