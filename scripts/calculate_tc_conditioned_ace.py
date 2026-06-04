@@ -143,7 +143,12 @@ def parse_float(value: str | None) -> float:
 
 
 def basin_threshold_signature(thresholds: dict[str, float]) -> str:
-    return ";".join(f"{basin_name}={float(thresholds.get(basin_name, np.nan)):.4f}" for basin_name in BASINS)
+    parts = []
+    for name in BASINS:
+        t = float(thresholds.get(name, np.nan))
+        lat_min, lat_max = BASINS[name]["lat_range"]
+        parts.append(f"{name}={t:.4f}:lat={lat_min:.1f}_{lat_max:.1f}")
+    return ";".join(parts)
 
 
 def load_basin_thresholds(
@@ -801,6 +806,16 @@ def plot_ace_diagnostics(
     """
     plot_dir.mkdir(parents=True, exist_ok=True)
     print("Generating unified diagnostic plots...")
+
+    # Force zeroing out any data south of 25S for the plots
+    if latitudes is not None:
+        mask_25s = latitudes < -25.0
+        local_ace = local_ace.copy()
+        local_ace[mask_25s, :] = 0.0
+        if local_ace_monthly is not None:
+            local_ace_monthly = {m: val.copy() for m, val in local_ace_monthly.items()}
+            for m in local_ace_monthly:
+                local_ace_monthly[m][mask_25s, :] = 0.0
 
     plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Helvetica", "Arial", "sans-serif"]
     plt.rcParams["font.family"] = "sans-serif"

@@ -351,6 +351,8 @@ def read_geos_candidates(paths: list[Path], args: argparse.Namespace) -> tuple[l
                 if not (np.isfinite(center_lat) and np.isfinite(center_lon) and np.isfinite(vmax_kt)):
                     skipped += 1
                     continue
+                if center_lat < -25.0:
+                    continue
                 over_ocean = row_over_ocean_value(row)
                 if args.ocean_only:
                     is_ocean = False if over_ocean is False else ocean_checker.is_ocean(center_lat, center_lon)

@@ -624,6 +624,12 @@ def plot_ace_diagnostics(
     plot_dir.mkdir(parents=True, exist_ok=True)
     print("Generating diagnostic plots...")
 
+    # Force zeroing out any data south of 25S for the plots
+    if latitudes is not None:
+        mask_25s = latitudes < -25.0
+        local_ace = local_ace.copy()
+        local_ace[mask_25s, :] = 0.0
+
     # Set up styling parameters for premium aesthetics
     plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Helvetica", "Arial", "sans-serif"]
     plt.rcParams["font.family"] = "sans-serif"

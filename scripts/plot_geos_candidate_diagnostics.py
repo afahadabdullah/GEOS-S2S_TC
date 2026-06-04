@@ -263,6 +263,8 @@ def read_candidates(paths: list[Path], months: set[str]) -> list[Candidate]:
                 if not (np.isfinite(center_lat) and np.isfinite(center_lon) and np.isfinite(vmax_kt)):
                     skipped += 1
                     continue
+                if center_lat < -25.0:
+                    continue
 
                 candidates.append(
                     Candidate(

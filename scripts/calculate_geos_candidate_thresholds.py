@@ -537,6 +537,13 @@ def load_existing_candidates(
             basin_name = row.get("basin_name", "")
             if basin_name not in BASINS:
                 continue
+            try:
+                center_lat = float(row.get("center_lat", "nan"))
+            except ValueError:
+                center_lat = float("nan")
+            if np.isfinite(center_lat) and center_lat < -25.0:
+                continue
+
             key = candidate_key_from_row(row)
             if key in candidate_keys:
                 continue
