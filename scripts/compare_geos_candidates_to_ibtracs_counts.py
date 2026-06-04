@@ -43,6 +43,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from ocean_mask_utils import add_ocean_only_args, build_ocean_checker, row_over_ocean_value
 
 
 DEFAULT_CANDIDATES = "data/calibration/*_candidates.csv"
@@ -121,7 +122,9 @@ class GeosCandidate:
     month: str
     basin_name: str
     center_lat: float
+    center_lon: float
     vmax_kt: float
+    over_ocean: bool | None
 
 
 @dataclass
@@ -298,7 +301,18 @@ def read_geos_candidates(paths: list[Path], args: argparse.Namespace) -> tuple[l
     all_candidates: list[GeosCandidate] = []
     plotted_candidates: list[GeosCandidate] = []
     skipped = 0
+    skipped_land = 0
     months = parse_months(args.months)
+    ocean_checker = None
+    if args.ocean_only:
+        ocean_checker, ocean_warning = build_ocean_checker(
+            args.ocean_mask_source,
+            mask_file=args.ocean_mask_file,
+            threshold=args.ocean_threshold,
+        )
+        print(f"Ocean-only GEOS candidate filter enabled: source={ocean_checker.source}")
+        if ocean_warning:
+            print(f"WARNING: GEOS ocean mask fallback: {ocean_warning}")
 
     for path in paths:
         with path.open(newline="") as handle:
@@ -320,10 +334,17 @@ def read_geos_candidates(paths: list[Path], args: argparse.Namespace) -> tuple[l
                     continue
 
                 center_lat = parse_float(row.get("center_lat"))
+                center_lon = normalize_lon(parse_float(row.get("center_lon")))
                 vmax_kt = parse_float(row.get("vmax_kt"))
-                if not (np.isfinite(center_lat) and np.isfinite(vmax_kt)):
+                if not (np.isfinite(center_lat) and np.isfinite(center_lon) and np.isfinite(vmax_kt)):
                     skipped += 1
                     continue
+                over_ocean = row_over_ocean_value(row)
+                if args.ocean_only:
+                    is_ocean = over_ocean if over_ocean is not None else ocean_checker.is_ocean(center_lat, center_lon)
+                    if not is_ocean:
+                        skipped_land += 1
+                        continue
 
                 candidate = GeosCandidate(
                     init_date=row.get("init_date", ""),
@@ -332,7 +353,9 @@ def read_geos_candidates(paths: list[Path], args: argparse.Namespace) -> tuple[l
                     month=month,
                     basin_name=basin_name,
                     center_lat=center_lat,
+                    center_lon=center_lon,
                     vmax_kt=vmax_kt,
+                    over_ocean=over_ocean,
                 )
                 all_candidates.append(candidate)
                 if args.min_lat <= center_lat <= args.max_lat:
@@ -340,10 +363,12 @@ def read_geos_candidates(paths: list[Path], args: argparse.Namespace) -> tuple[l
 
     if skipped:
         print(f"Skipped {skipped} incomplete/unrecognized GEOS candidate rows.")
+    if skipped_land:
+        print(f"Skipped {skipped_land:,} GEOS candidate rows over land.")
     return all_candidates, plotted_candidates
 
 
-def read_thresholds(paths: list[Path], observed_wind_var: str, basin_method: str) -> dict[str, float]:
+def read_thresholds(paths: list[Path], observed_wind_var: str, basin_method: str, ocean_only: bool) -> dict[str, float]:
     thresholds: dict[str, float] = {}
     for path in paths:
         with path.open(newline="") as handle:
@@ -355,6 +380,8 @@ def read_thresholds(paths: list[Path], observed_wind_var: str, basin_method: str
                 if row.get("observed_wind_var") and row.get("observed_wind_var") != observed_wind_var:
                     continue
                 if row.get("observed_basin_method") and row.get("observed_basin_method") != basin_method:
+                    continue
+                if ocean_only and row.get("ocean_only") != "1":
                     continue
                 threshold = parse_float(row.get("geos_threshold_kt"))
                 if np.isfinite(threshold):
@@ -369,6 +396,7 @@ def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, 
     wind_samples: dict[str, list[float]] = defaultdict(list)
     skipped = 0
     skipped_nature = 0
+    skipped_land = 0
 
     with netCDF4.Dataset(args.ibtracs, "r") as ds:
         required = ["time", "lat", "lon", args.wind_var]
@@ -394,6 +422,19 @@ def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, 
         basin_values = ds.variables["basin"] if "basin" in ds.variables else None
         nature_values = ds.variables["nature"] if allowed_natures else None
         sid_values = ds.variables["sid"] if "sid" in ds.variables else None
+        dist2land_values = ds.variables["dist2land"][:] if args.ocean_only and "dist2land" in ds.variables else None
+        ocean_checker = None
+        if args.ocean_only and dist2land_values is None:
+            ocean_checker, ocean_warning = build_ocean_checker(
+                args.ocean_mask_source,
+                mask_file=args.ocean_mask_file,
+                threshold=args.ocean_threshold,
+            )
+            print(f"Ocean-only IBTrACS filter enabled: source={ocean_checker.source}")
+            if ocean_warning:
+                print(f"WARNING: IBTrACS ocean mask fallback: {ocean_warning}")
+        elif args.ocean_only:
+            print("Ocean-only IBTrACS filter enabled: source=dist2land")
 
         nstorm, ntime = time_values.shape
         for storm_index in range(nstorm):
@@ -423,6 +464,15 @@ def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, 
                 if lat is None or lon is None or wind is None or wind < 0.0:
                     skipped += 1
                     continue
+                if args.ocean_only:
+                    if dist2land_values is not None:
+                        dist2land = finite_value(dist2land_values[storm_index, time_index])
+                        is_ocean = dist2land is not None and dist2land > 0.0
+                    else:
+                        is_ocean = ocean_checker.is_ocean(lat, lon)
+                    if not is_ocean:
+                        skipped_land += 1
+                        continue
 
                 if args.basin_method == "boxes":
                     basin_name = basin_from_boxes(lat, lon)
@@ -456,6 +506,8 @@ def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, 
         print(f"Skipped {skipped} incomplete/unassigned IBTrACS samples.")
     if skipped_nature:
         print(f"Skipped {skipped_nature} IBTrACS samples outside nature filter: {args.nature_filter or 'ALL'}")
+    if skipped_land:
+        print(f"Skipped {skipped_land:,} IBTrACS samples over land.")
     return fixes, wind_samples
 
 
@@ -1131,6 +1183,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--min-lat", type=float, default=-25.0)
     parser.add_argument("--max-lat", type=float, default=50.0)
+    add_ocean_only_args(parser)
     parser.add_argument("--expected-members-per-year", type=int, default=0, help="Use this denominator for GEOS member means. Default uses active members visible in candidate CSV.")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--plot-dir", default=DEFAULT_PLOT_DIR)
@@ -1179,7 +1232,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Reading GEOS threshold CSV files:")
             for path in threshold_paths:
                 print(f"  - {path}")
-        geos_thresholds = read_thresholds(threshold_paths, args.wind_var, args.basin_method)
+        geos_thresholds = read_thresholds(threshold_paths, args.wind_var, args.basin_method, args.ocean_only)
         geos_thresholds = fill_missing_geos_thresholds(geos_thresholds, recomputed_thresholds)
         print("Using GEOS thresholds from CSV where available; recomputed thresholds fill missing basins.")
     else:

@@ -32,6 +32,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
+from ocean_mask_utils import add_ocean_only_args, build_ocean_checker, row_over_ocean_value
 
 try:
     import cartopy.crs as ccrs
@@ -118,6 +119,7 @@ class Candidate:
     qv850_anom_gpkg: float
     vort850_s1: float
     used_vorticity: int
+    over_ocean: bool | None
 
 
 def configure_streams() -> None:
@@ -151,6 +153,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-lat", type=float, default=-25.0, help="Minimum candidate latitude to plot. Default trims south of 25S.")
     parser.add_argument("--max-lat", type=float, default=50.0, help="Maximum candidate latitude to plot.")
     parser.add_argument("--density-bin-deg", type=float, default=2.0, help="Lat/lon bin size for the global density map.")
+    add_ocean_only_args(parser)
     parser.add_argument(
         "--months",
         default="",
@@ -278,6 +281,7 @@ def read_candidates(paths: list[Path], months: set[str]) -> list[Candidate]:
                         qv850_anom_gpkg=parse_float(row.get("qv850_anom_gpkg")),
                         vort850_s1=parse_float(row.get("vort850_s1")),
                         used_vorticity=parse_int(row.get("used_vorticity")),
+                        over_ocean=row_over_ocean_value(row),
                     )
                 )
     if skipped:
@@ -285,7 +289,33 @@ def read_candidates(paths: list[Path], months: set[str]) -> list[Candidate]:
     return candidates
 
 
-def read_thresholds(paths: list[Path]) -> dict[str, dict[str, float | str]]:
+def filter_candidates_by_ocean(candidates: list[Candidate], args: argparse.Namespace) -> list[Candidate]:
+    if not args.ocean_only:
+        return candidates
+
+    checker, warning = build_ocean_checker(
+        args.ocean_mask_source,
+        mask_file=args.ocean_mask_file,
+        threshold=args.ocean_threshold,
+    )
+    print(f"Ocean-only candidate filter enabled: source={checker.source}")
+    if warning:
+        print(f"WARNING: ocean mask fallback: {warning}")
+
+    filtered: list[Candidate] = []
+    skipped_land = 0
+    for candidate in candidates:
+        is_ocean = candidate.over_ocean if candidate.over_ocean is not None else checker.is_ocean(candidate.center_lat, candidate.center_lon)
+        if is_ocean:
+            filtered.append(candidate)
+        else:
+            skipped_land += 1
+
+    print(f"Skipped {skipped_land:,} GEOS candidate rows over land.")
+    return filtered
+
+
+def read_thresholds(paths: list[Path], ocean_only: bool) -> dict[str, dict[str, float | str]]:
     thresholds: dict[str, dict[str, float | str]] = {}
     for path in paths:
         with path.open(newline="") as handle:
@@ -296,6 +326,8 @@ def read_thresholds(paths: list[Path]) -> dict[str, dict[str, float | str]]:
                     continue
                 threshold = parse_float(row.get("geos_threshold_kt"))
                 if not np.isfinite(threshold):
+                    continue
+                if ocean_only and row.get("ocean_only") != "1":
                     continue
                 thresholds[basin_name] = {
                     "threshold_kt": threshold,
@@ -1002,6 +1034,7 @@ def main(argv: list[str] | None = None) -> int:
     for path in candidate_paths:
         print(f"  - {path}")
     all_candidates = read_candidates(candidate_paths, months)
+    all_candidates = filter_candidates_by_ocean(all_candidates, args)
     candidates = filter_candidates_by_latitude(all_candidates, args.min_lat, args.max_lat)
     print(f"Loaded {len(all_candidates):,} complete candidate rows.")
     print(f"Using {len(candidates):,} candidate rows after latitude filter {args.min_lat:.1f} to {args.max_lat:.1f}.")
@@ -1014,7 +1047,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Reading threshold CSV files:")
         for path in threshold_paths:
             print(f"  - {path}")
-    thresholds = read_thresholds(threshold_paths)
+    thresholds = read_thresholds(threshold_paths, args.ocean_only)
 
     observed_path = Path(args.observed_percentiles)
     observed_percentiles = read_observed_percentiles(

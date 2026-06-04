@@ -91,6 +91,7 @@ from calculate_tc_conditioned_ace import (
     slp_to_hpa,
     to_datetime,
 )
+from ocean_mask_utils import add_ocean_only_args, build_ocean_checker, row_over_ocean_value
 
 
 DEFAULT_OBS_PERCENTILES = "data/obs/ibtracs/ibtracs_observed_percentiles.csv"
@@ -123,6 +124,7 @@ class CandidateRow:
     qv850_anom_gpkg: float
     vort850_s1: float
     used_vorticity: int
+    over_ocean: int
 
 
 def normalize_lon(lon: float) -> float:
@@ -365,6 +367,7 @@ def write_candidates_header(handle) -> csv.DictWriter:
         "qv850_anom_gpkg",
         "vort850_s1",
         "used_vorticity",
+        "over_ocean",
     ]
     writer = csv.DictWriter(handle, fieldnames=fieldnames)
     writer.writeheader()
@@ -396,6 +399,7 @@ def write_candidate(writer: csv.DictWriter, row: CandidateRow) -> None:
             "qv850_anom_gpkg": row.qv850_anom_gpkg,
             "vort850_s1": row.vort850_s1,
             "used_vorticity": row.used_vorticity,
+            "over_ocean": row.over_ocean,
         }
     )
     flush_handle = getattr(writer, "_flush_handle", None)
@@ -520,6 +524,7 @@ def load_existing_candidates(
     geos_vmax_by_basin: dict[str, list[float]],
     basin_stats: dict[str, dict[str, int]],
     candidate_keys: set[tuple[str, str, str, str, str, str]],
+    ocean_only: bool,
 ) -> int:
     if not path.exists() or path.stat().st_size == 0:
         return 0
@@ -539,6 +544,10 @@ def load_existing_candidates(
             except ValueError:
                 continue
             if not np.isfinite(vmax_kt):
+                continue
+            over_ocean = row_over_ocean_value(row)
+            if ocean_only and over_ocean is False:
+                basin_stats[basin_name]["resumed_land_candidates_skipped"] += 1
                 continue
             candidate_keys.add(key)
             geos_vmax_by_basin[basin_name].append(vmax_kt)
@@ -580,6 +589,7 @@ def write_candidate_fieldnames() -> list[str]:
         "qv850_anom_gpkg",
         "vort850_s1",
         "used_vorticity",
+        "over_ocean",
     ]
 
 
@@ -636,6 +646,18 @@ def collect_candidates_for_member(
         lon_wind_radius = index_radius(longitudes, args.wind_search_radius_deg)
         lat_local_min_radius = index_radius(latitudes, args.local_min_radius_deg)
         lon_local_min_radius = index_radius(longitudes, args.local_min_radius_deg)
+        ocean_checker = None
+        if args.ocean_only:
+            sfc_mask_path = sfc_index.entries[0].file_path if sfc_index.entries else None
+            ocean_checker, ocean_warning = build_ocean_checker(
+                args.ocean_mask_source,
+                sfc_path=sfc_mask_path,
+                mask_file=args.ocean_mask_file,
+                threshold=args.ocean_threshold,
+            )
+            print(f"Ocean-only filter enabled for {init_date} {ens}: source={ocean_checker.source}")
+            if ocean_warning:
+                print(f"WARNING: ocean mask fallback for {init_date} {ens}: {ocean_warning}")
 
         print(f"Processing {init_date} {ens}: SFC files={len(sfc_files)} ATM files={len(atm_files)}")
 
@@ -764,6 +786,12 @@ def collect_candidates_for_member(
 
                                 center_lat = float(latitudes[center_lat_idx])
                                 center_lon = normalize_lon(float(longitudes[center_lon_idx]))
+                                over_ocean = 1
+                                if ocean_checker is not None:
+                                    over_ocean = int(ocean_checker.is_ocean(center_lat, center_lon))
+                                    if not over_ocean:
+                                        basin_stats[basin_name]["rejected_land"] += 1
+                                        continue
 
                                 slp_env = annulus_mean(
                                     slp_hpa,
@@ -857,6 +885,7 @@ def collect_candidates_for_member(
                                     qv850_anom_gpkg=qv_anom,
                                     vort850_s1=float(vort850),
                                     used_vorticity=used_vorticity,
+                                    over_ocean=over_ocean,
                                 )
                                 candidate_key = candidate_key_from_candidate(candidate_row)
                                 if candidate_key in candidate_keys:
@@ -917,7 +946,9 @@ def write_thresholds(
         "resumed_existing_candidates",
         "duplicate_resume_candidate",
         "skipped_completed_times",
+        "resumed_land_candidates_skipped",
         "rejected_structure",
+        "rejected_land",
         "duplicate_center",
         "max_centers_reached",
         "missing_sfc_match",
@@ -935,6 +966,9 @@ def write_thresholds(
         "resume",
         "progress_path",
         "stopped_early",
+        "ocean_only",
+        "ocean_mask_source",
+        "ocean_threshold",
         "ignore_vorticity",
     ]
 
@@ -980,7 +1014,9 @@ def write_thresholds(
                         "resumed_existing_candidates": basin_stats[basin_name]["resumed_existing_candidates"],
                         "duplicate_resume_candidate": basin_stats[basin_name]["duplicate_resume_candidate"],
                         "skipped_completed_times": basin_stats[basin_name]["skipped_completed_times"],
+                        "resumed_land_candidates_skipped": basin_stats[basin_name]["resumed_land_candidates_skipped"],
                         "rejected_structure": basin_stats[basin_name]["rejected_structure"],
+                        "rejected_land": basin_stats[basin_name]["rejected_land"],
                         "duplicate_center": basin_stats[basin_name]["duplicate_center"],
                         "max_centers_reached": basin_stats[basin_name]["max_centers_reached"],
                         "missing_sfc_match": basin_stats[basin_name]["missing_sfc_match"],
@@ -998,6 +1034,9 @@ def write_thresholds(
                         "resume": int(args.resume),
                         "progress_path": str(args._progress_path),
                         "stopped_early": int(getattr(args, "_stopped_early", False)),
+                        "ocean_only": int(args.ocean_only),
+                        "ocean_mask_source": args.ocean_mask_source,
+                        "ocean_threshold": args.ocean_threshold,
                         "ignore_vorticity": int(args.ignore_vorticity),
                     }
                 )
@@ -1068,6 +1107,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Number of lowest-SLP basin grid points inspected for local minima at each basin/time.",
     )
     parser.add_argument("--ignore-vorticity", action="store_true")
+    add_ocean_only_args(parser)
     parser.add_argument("--max-init-dates", type=int, default=0, help="Optional smoke-test limit.")
     parser.add_argument("--resume", action="store_true", help="Append to an existing candidate CSV and skip time steps listed in the progress CSV.")
     parser.add_argument("--progress-path", default=None, help="Optional resume progress CSV path. Default is OUTPUT_PREFIX_progress.csv.")
@@ -1093,6 +1133,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.local_min_radius_deg <= 0.0:
         print("ERROR: --local-min-radius-deg must be > 0", file=sys.stderr)
+        return 1
+    if not (0.0 <= args.ocean_threshold <= 1.0):
+        print("ERROR: --ocean-threshold must be between 0 and 1", file=sys.stderr)
         return 1
     if args.stop_after_hours < 0.0:
         print("ERROR: --stop-after-hours must be >= 0", file=sys.stderr)
@@ -1139,6 +1182,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Progress CSV will be written to: {progress_path}", flush=True)
     print(f"Resume mode: {int(args.resume)}", flush=True)
     print(f"Stop after hours: {args.stop_after_hours}", flush=True)
+    print(f"Ocean-only: {int(args.ocean_only)} source={args.ocean_mask_source} threshold={args.ocean_threshold}", flush=True)
 
     geos_vmax_by_basin: dict[str, list[float]] = {basin_name: [] for basin_name in BASINS}
     basin_stats: dict[str, dict[str, int]] = {
@@ -1149,7 +1193,11 @@ def main(argv: list[str] | None = None) -> int:
     completed_time_keys = read_completed_time_keys(progress_path) if args.resume else set()
     if args.resume and completed_time_keys:
         print(f"Loaded {len(completed_time_keys)} completed time steps from {progress_path}", flush=True)
-    loaded_existing = load_existing_candidates(candidates_path, geos_vmax_by_basin, basin_stats, candidate_keys) if args.resume else 0
+    loaded_existing = (
+        load_existing_candidates(candidates_path, geos_vmax_by_basin, basin_stats, candidate_keys, args.ocean_only)
+        if args.resume
+        else 0
+    )
     if loaded_existing:
         print(f"Loaded {loaded_existing} existing candidate rows from {candidates_path}", flush=True)
 

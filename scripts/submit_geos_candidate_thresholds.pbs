@@ -51,6 +51,10 @@ LOCAL_MIN_RADIUS_DEG="${LOCAL_MIN_RADIUS_DEG:-2.0}"
 CENTER_SEARCH_POINTS="${CENTER_SEARCH_POINTS:-200}"
 IGNORE_VORTICITY="${IGNORE_VORTICITY:-0}"
 MAX_INIT_DATES="${MAX_INIT_DATES:-0}"
+OCEAN_ONLY="${OCEAN_ONLY:-1}"
+OCEAN_MASK_SOURCE="${OCEAN_MASK_SOURCE:-auto}"
+OCEAN_MASK_FILE="${OCEAN_MASK_FILE:-/nobackupp28/knakada/GEOSS2S3/GEOS_fcst/20240829/ens2/sfc_tavg_3hr_glo_L720x361_sfc/20240829.sfc_tavg_3hr_glo_L720x361_sfc.monthly.202408.nc4}"
+OCEAN_THRESHOLD="${OCEAN_THRESHOLD:-0.5}"
 RESUME="${RESUME:-0}"
 PROGRESS_PATH="${PROGRESS_PATH:-}"
 AUTO_RESUBMIT="${AUTO_RESUBMIT:-0}"
@@ -228,6 +232,10 @@ submit_resume_job() {
   append_qsub_var "CENTER_SEARCH_POINTS" "${CENTER_SEARCH_POINTS}"
   append_qsub_var "IGNORE_VORTICITY" "${IGNORE_VORTICITY}"
   append_qsub_var "MAX_INIT_DATES" "${MAX_INIT_DATES}"
+  append_qsub_var "OCEAN_ONLY" "${OCEAN_ONLY}"
+  append_qsub_var "OCEAN_MASK_SOURCE" "${OCEAN_MASK_SOURCE}"
+  append_qsub_var "OCEAN_MASK_FILE" "${OCEAN_MASK_FILE}"
+  append_qsub_var "OCEAN_THRESHOLD" "${OCEAN_THRESHOLD}"
   append_qsub_var "RESUME" "1"
   append_qsub_var "PROGRESS_PATH" "${PROGRESS_PATH}"
   append_qsub_var "AUTO_RESUBMIT" "${AUTO_RESUBMIT}"
@@ -362,6 +370,9 @@ run_candidate_diagnostics() {
     --months "${CANDIDATE_DIAG_MONTHS}"
     --min-lat "${CANDIDATE_DIAG_MIN_LAT}"
     --max-lat "${CANDIDATE_DIAG_MAX_LAT}"
+    --ocean-mask-source "${OCEAN_MASK_SOURCE}"
+    --ocean-mask-file "${OCEAN_MASK_FILE}"
+    --ocean-threshold "${OCEAN_THRESHOLD}"
     --plot-dir "${CANDIDATE_DIAG_PLOT_DIR}"
     --prefix "${diag_prefix}"
     --dpi "${CANDIDATE_DIAG_DPI}"
@@ -370,6 +381,9 @@ run_candidate_diagnostics() {
 
   if [[ -n "${diag_thresholds}" ]]; then
     diag_cmd+=(--thresholds "${diag_thresholds}")
+  fi
+  if [[ "${OCEAN_ONLY}" != "1" ]]; then
+    diag_cmd+=(--no-ocean-only)
   fi
 
   echo "Running candidate diagnostics: ${diag_cmd[*]}"
@@ -422,6 +436,9 @@ run_count_diagnostics() {
     --threshold-source "${COUNT_DIAG_THRESHOLD_SOURCE}"
     --min-lat "${COUNT_DIAG_MIN_LAT}"
     --max-lat "${COUNT_DIAG_MAX_LAT}"
+    --ocean-mask-source "${OCEAN_MASK_SOURCE}"
+    --ocean-mask-file "${OCEAN_MASK_FILE}"
+    --ocean-threshold "${OCEAN_THRESHOLD}"
     --output-dir "${COUNT_DIAG_OUTPUT_DIR}"
     --plot-dir "${COUNT_DIAG_PLOT_DIR}"
     --prefix "${diag_prefix}"
@@ -435,6 +452,9 @@ run_count_diagnostics() {
 
   if [[ "${COUNT_DIAG_EXPECTED_MEMBERS_PER_YEAR}" != "0" ]]; then
     diag_cmd+=(--expected-members-per-year "${COUNT_DIAG_EXPECTED_MEMBERS_PER_YEAR}")
+  fi
+  if [[ "${OCEAN_ONLY}" != "1" ]]; then
+    diag_cmd+=(--no-ocean-only)
   fi
 
   echo "Running count diagnostics: ${diag_cmd[*]}"
@@ -466,6 +486,10 @@ echo "MIN_CENTER_SEPARATION_DEG=${MIN_CENTER_SEPARATION_DEG}"
 echo "LOCAL_MIN_RADIUS_DEG=${LOCAL_MIN_RADIUS_DEG}"
 echo "CENTER_SEARCH_POINTS=${CENTER_SEARCH_POINTS}"
 echo "IGNORE_VORTICITY=${IGNORE_VORTICITY}"
+echo "OCEAN_ONLY=${OCEAN_ONLY}"
+echo "OCEAN_MASK_SOURCE=${OCEAN_MASK_SOURCE}"
+echo "OCEAN_MASK_FILE=${OCEAN_MASK_FILE}"
+echo "OCEAN_THRESHOLD=${OCEAN_THRESHOLD}"
 echo "RESUME=${RESUME}"
 echo "PROGRESS_PATH=${PROGRESS_PATH}"
 echo "AUTO_RESUBMIT=${AUTO_RESUBMIT}"
@@ -580,6 +604,11 @@ fi
 
 if [[ "${MAX_INIT_DATES}" != "0" ]]; then
   cmd+=(--max-init-dates "${MAX_INIT_DATES}")
+fi
+
+cmd+=(--ocean-mask-source "${OCEAN_MASK_SOURCE}" --ocean-mask-file "${OCEAN_MASK_FILE}" --ocean-threshold "${OCEAN_THRESHOLD}")
+if [[ "${OCEAN_ONLY}" != "1" ]]; then
+  cmd+=(--no-ocean-only)
 fi
 
 if [[ "${RESUME}" == "1" ]]; then

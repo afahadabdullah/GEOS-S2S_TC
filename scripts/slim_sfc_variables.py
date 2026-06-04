@@ -25,7 +25,7 @@ from pathlib import Path
 
 DEFAULT_SFC_ROOT = "/nobackupp27/afahad/project/GEOS-S2S_TC/data"
 DEFAULT_COLLECTION = "sfc_tavg_3hr_glo_L720x361_sfc"
-DEFAULT_KEEP_VARIABLES = "QS,T2M,TS,US,VS"
+DEFAULT_KEEP_VARIABLES = "QS,T2M,TS,US,VS,FROCEAN,FRSEAICE,FRLAND,FRLANDICE"
 DONE_SUFFIX = ".sfc_var_slim_done"
 DONE_ATTR = "geos_s2s_tc_sfc_var_slim_done"
 KEEP_ATTR = "geos_s2s_tc_sfc_var_slim_keep_variables"

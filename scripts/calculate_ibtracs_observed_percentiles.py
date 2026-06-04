@@ -27,6 +27,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+from ocean_mask_utils import add_ocean_only_args, build_ocean_checker
 
 try:
     import netCDF4
@@ -205,6 +206,7 @@ def calculate_percentiles(args: argparse.Namespace) -> list[dict[str, object]]:
     skipped_no_basin = 0
     skipped_nature = 0
     skipped_no_time = 0
+    skipped_land = 0
 
     with netCDF4.Dataset(args.ibtracs, "r") as ds:
         missing_vars = [name for name in wind_vars if name not in ds.variables]
@@ -232,6 +234,19 @@ def calculate_percentiles(args: argparse.Namespace) -> list[dict[str, object]]:
         basin_values = ds.variables["basin"]
         nature_values = ds.variables["nature"] if allowed_natures else None
         wind_values = {name: ds.variables[name][:] for name in wind_vars}
+        dist2land_values = ds.variables["dist2land"][:] if args.ocean_only and "dist2land" in ds.variables else None
+        ocean_checker = None
+        if args.ocean_only and dist2land_values is None:
+            ocean_checker, ocean_warning = build_ocean_checker(
+                args.ocean_mask_source,
+                mask_file=args.ocean_mask_file,
+                threshold=args.ocean_threshold,
+            )
+            print(f"Ocean-only IBTrACS percentile filter enabled: source={ocean_checker.source}")
+            if ocean_warning:
+                print(f"WARNING: IBTrACS ocean mask fallback: {ocean_warning}")
+        elif args.ocean_only:
+            print("Ocean-only IBTrACS percentile filter enabled: source=dist2land")
 
         nstorm, ntime = time_values.shape
         for storm_index in range(nstorm):
@@ -255,6 +270,15 @@ def calculate_percentiles(args: argparse.Namespace) -> list[dict[str, object]]:
                 if lat is None or lon is None:
                     skipped_no_basin += 1
                     continue
+                if args.ocean_only:
+                    if dist2land_values is not None:
+                        dist2land = finite_position_value(dist2land_values[storm_index, time_index])
+                        is_ocean = dist2land is not None and dist2land > 0.0
+                    else:
+                        is_ocean = ocean_checker.is_ocean(lat, lon)
+                    if not is_ocean:
+                        skipped_land += 1
+                        continue
 
                 if args.basin_method == "boxes":
                     basin_name = basin_from_boxes(lat, lon)
@@ -287,6 +311,8 @@ def calculate_percentiles(args: argparse.Namespace) -> list[dict[str, object]]:
                     "months": ",".join(str(month) for month in sorted(months)),
                     "synoptic_only": int(args.synoptic_only),
                     "nature_filter": ",".join(sorted(allowed_natures)) if allowed_natures else "ALL",
+                    "ocean_only": int(args.ocean_only),
+                    "ocean_mask_source": args.ocean_mask_source,
                     **stats,
                 }
             )
@@ -294,6 +320,7 @@ def calculate_percentiles(args: argparse.Namespace) -> list[dict[str, object]]:
     if args.verbose:
         print(f"Skipped missing time samples: {skipped_no_time}")
         print(f"Skipped samples outside nature filter: {skipped_nature}")
+        print(f"Skipped land samples: {skipped_land}")
         print(f"Skipped samples outside supported basins/missing position: {skipped_no_basin}")
 
     return rows
@@ -312,6 +339,8 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "months",
         "synoptic_only",
         "nature_filter",
+        "ocean_only",
+        "ocean_mask_source",
         "n_samples",
         "count_le_threshold",
         "p_obs_threshold",
@@ -384,6 +413,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="synoptic_only",
         help="Include all IBTrACS times instead of only 00/06/12/18 UTC samples.",
     )
+    add_ocean_only_args(parser)
     parser.add_argument("--output-csv", default=DEFAULT_OUTPUT_CSV)
     parser.add_argument("--no-output-csv", action="store_true", help="Print only; do not write a CSV file.")
     parser.add_argument("--verbose", action="store_true")
