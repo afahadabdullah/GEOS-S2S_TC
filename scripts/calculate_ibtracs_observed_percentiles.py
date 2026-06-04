@@ -241,6 +241,7 @@ def calculate_percentiles(args: argparse.Namespace) -> list[dict[str, object]]:
                 args.ocean_mask_source,
                 mask_file=args.ocean_mask_file,
                 threshold=args.ocean_threshold,
+                require_mask=True,
             )
             print(f"Ocean-only IBTrACS percentile filter enabled: source={ocean_checker.source}")
             if ocean_warning:

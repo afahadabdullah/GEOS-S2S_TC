@@ -190,8 +190,11 @@ def build_ocean_checker(
     sfc_path: Path | None = None,
     mask_file: str | Path | None = None,
     threshold: float = 0.5,
+    require_mask: bool = False,
 ) -> tuple[OceanChecker, str | None]:
     if source == "none":
+        if require_mask:
+            raise RuntimeError("ocean-only filtering requested, but --ocean-mask-source none disables the mask")
         return NoopOceanChecker(), None
 
     warnings: list[str] = []
@@ -220,7 +223,10 @@ def build_ocean_checker(
         except Exception as exc:
             warnings.append(str(exc))
 
-    return NoopOceanChecker(), "; ".join(warnings) if warnings else "ocean mask disabled"
+    warning_text = "; ".join(warnings) if warnings else "ocean mask disabled"
+    if require_mask:
+        raise RuntimeError(f"ocean-only filtering requested, but no usable ocean mask was built: {warning_text}")
+    return NoopOceanChecker(), warning_text
 
 
 def row_over_ocean_value(row: dict[str, str]) -> bool | None:

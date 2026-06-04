@@ -525,6 +525,7 @@ def load_existing_candidates(
     basin_stats: dict[str, dict[str, int]],
     candidate_keys: set[tuple[str, str, str, str, str, str]],
     ocean_only: bool,
+    ocean_checker=None,
 ) -> int:
     if not path.exists() or path.stat().st_size == 0:
         return 0
@@ -546,9 +547,19 @@ def load_existing_candidates(
             if not np.isfinite(vmax_kt):
                 continue
             over_ocean = row_over_ocean_value(row)
-            if ocean_only and over_ocean is False:
-                basin_stats[basin_name]["resumed_land_candidates_skipped"] += 1
-                continue
+            if ocean_only:
+                is_ocean = over_ocean is not False
+                if is_ocean and ocean_checker is not None:
+                    try:
+                        center_lat = float(row.get("center_lat", "nan"))
+                        center_lon = normalize_lon(float(row.get("center_lon", "nan")))
+                    except ValueError:
+                        center_lat = float("nan")
+                        center_lon = float("nan")
+                    is_ocean = ocean_checker.is_ocean(center_lat, center_lon)
+                if not is_ocean:
+                    basin_stats[basin_name]["resumed_land_candidates_skipped"] += 1
+                    continue
             candidate_keys.add(key)
             geos_vmax_by_basin[basin_name].append(vmax_kt)
             basin_stats[basin_name]["accepted_candidates"] += 1
@@ -654,6 +665,7 @@ def collect_candidates_for_member(
                 sfc_path=sfc_mask_path,
                 mask_file=args.ocean_mask_file,
                 threshold=args.ocean_threshold,
+                require_mask=True,
             )
             print(f"Ocean-only filter enabled for {init_date} {ens}: source={ocean_checker.source}")
             if ocean_warning:
@@ -1193,8 +1205,26 @@ def main(argv: list[str] | None = None) -> int:
     completed_time_keys = read_completed_time_keys(progress_path) if args.resume else set()
     if args.resume and completed_time_keys:
         print(f"Loaded {len(completed_time_keys)} completed time steps from {progress_path}", flush=True)
+    resume_ocean_checker = None
+    if args.resume and args.ocean_only:
+        resume_ocean_checker, resume_ocean_warning = build_ocean_checker(
+            args.ocean_mask_source,
+            mask_file=args.ocean_mask_file,
+            threshold=args.ocean_threshold,
+            require_mask=True,
+        )
+        print(f"Ocean-only resume filter enabled: source={resume_ocean_checker.source}", flush=True)
+        if resume_ocean_warning:
+            print(f"WARNING: ocean mask fallback while loading existing candidates: {resume_ocean_warning}", flush=True)
     loaded_existing = (
-        load_existing_candidates(candidates_path, geos_vmax_by_basin, basin_stats, candidate_keys, args.ocean_only)
+        load_existing_candidates(
+            candidates_path,
+            geos_vmax_by_basin,
+            basin_stats,
+            candidate_keys,
+            args.ocean_only,
+            resume_ocean_checker,
+        )
         if args.resume
         else 0
     )

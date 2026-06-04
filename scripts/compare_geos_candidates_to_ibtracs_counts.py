@@ -297,6 +297,17 @@ def valid_year_month(year: int, month: str, start_year: int, end_year: int, mont
     return start_year <= year <= end_year and (not months or month in months)
 
 
+def available_geos_years(candidates: list[GeosCandidate], args: argparse.Namespace) -> list[int]:
+    return sorted({candidate.year for candidate in candidates if args.start_year <= candidate.year <= args.end_year})
+
+
+def comparison_years(args: argparse.Namespace) -> list[int]:
+    years = getattr(args, "comparison_years", None)
+    if years is not None:
+        return list(years)
+    return list(range(args.start_year, args.end_year + 1))
+
+
 def read_geos_candidates(paths: list[Path], args: argparse.Namespace) -> tuple[list[GeosCandidate], list[GeosCandidate]]:
     all_candidates: list[GeosCandidate] = []
     plotted_candidates: list[GeosCandidate] = []
@@ -309,6 +320,7 @@ def read_geos_candidates(paths: list[Path], args: argparse.Namespace) -> tuple[l
             args.ocean_mask_source,
             mask_file=args.ocean_mask_file,
             threshold=args.ocean_threshold,
+            require_mask=True,
         )
         print(f"Ocean-only GEOS candidate filter enabled: source={ocean_checker.source}")
         if ocean_warning:
@@ -341,7 +353,7 @@ def read_geos_candidates(paths: list[Path], args: argparse.Namespace) -> tuple[l
                     continue
                 over_ocean = row_over_ocean_value(row)
                 if args.ocean_only:
-                    is_ocean = over_ocean if over_ocean is not None else ocean_checker.is_ocean(center_lat, center_lon)
+                    is_ocean = False if over_ocean is False else ocean_checker.is_ocean(center_lat, center_lon)
                     if not is_ocean:
                         skipped_land += 1
                         continue
@@ -389,7 +401,7 @@ def read_thresholds(paths: list[Path], observed_wind_var: str, basin_method: str
     return thresholds
 
 
-def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, list[float]]]:
+def read_ibtracs(args: argparse.Namespace, allowed_years: set[int] | None = None) -> tuple[list[IbtracsFix], dict[str, list[float]]]:
     months = parse_months(args.months)
     allowed_natures = {item.upper() for item in parse_list(args.nature_filter)}
     fixes: list[IbtracsFix] = []
@@ -429,6 +441,7 @@ def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, 
                 args.ocean_mask_source,
                 mask_file=args.ocean_mask_file,
                 threshold=args.ocean_threshold,
+                require_mask=True,
             )
             print(f"Ocean-only IBTrACS filter enabled: source={ocean_checker.source}")
             if ocean_warning:
@@ -451,6 +464,8 @@ def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, 
                 if args.synoptic_only and hour not in (0, 6, 12, 18):
                     continue
                 if not valid_year_month(year, month, args.start_year, args.end_year, months):
+                    continue
+                if allowed_years is not None and year not in allowed_years:
                     continue
                 if nature_values is not None:
                     nature = read_storm_time_text(nature_values, storm_index, time_index)
@@ -509,6 +524,19 @@ def read_ibtracs(args: argparse.Namespace) -> tuple[list[IbtracsFix], dict[str, 
     if skipped_land:
         print(f"Skipped {skipped_land:,} IBTrACS samples over land.")
     return fixes, wind_samples
+
+
+def print_geos_year_coverage(candidates: list[GeosCandidate], args: argparse.Namespace, label: str) -> None:
+    years = available_geos_years(candidates, args)
+    requested_years = list(range(args.start_year, args.end_year + 1))
+    missing_years = [year for year in requested_years if year not in years]
+    if years:
+        print(f"{label}: {years[0]}-{years[-1]} ({len(years)}/{len(requested_years)} requested years)")
+        print(f"  Used years: {', '.join(str(year) for year in years)}")
+    else:
+        print(f"{label}: none in requested range {args.start_year}-{args.end_year}")
+    if missing_years:
+        print(f"  Missing requested years in cached GEOS CSV after filters: {', '.join(str(year) for year in missing_years)}")
 
 
 def quantile_matched_geos_thresholds(
@@ -572,7 +600,7 @@ def build_yearly_rows(
     geos_thresholds: dict[str, float],
     args: argparse.Namespace,
 ) -> list[dict[str, object]]:
-    years = list(range(args.start_year, args.end_year + 1))
+    years = comparison_years(args)
     members_by_year = active_members_by_year(geos_candidates)
     rows: list[dict[str, object]] = []
 
@@ -628,7 +656,7 @@ def build_monthly_rows(
     geos_thresholds: dict[str, float],
     args: argparse.Namespace,
 ) -> list[dict[str, object]]:
-    years = list(range(args.start_year, args.end_year + 1))
+    years = comparison_years(args)
     months = sorted(parse_months(args.months))
     members_by_year = active_members_by_year(geos_candidates)
     rows: list[dict[str, object]] = []
@@ -792,7 +820,7 @@ def count_matched_geos_thresholds(
     ibtracs_fixes: list[IbtracsFix],
     args: argparse.Namespace,
 ) -> tuple[dict[str, float], list[dict[str, object]]]:
-    years = list(range(args.start_year, args.end_year + 1))
+    years = comparison_years(args)
     members_by_year = active_members_by_year(geos_candidates)
     thresholds: dict[str, float] = {}
     rows: list[dict[str, object]] = []
@@ -1208,11 +1236,19 @@ def main(argv: list[str] | None = None) -> int:
     for path in candidate_paths:
         print(f"  - {path}")
     all_geos_candidates, geos_candidates = read_geos_candidates(candidate_paths, args)
+    print_geos_year_coverage(all_geos_candidates, args, "GEOS candidate years after month/ocean filters")
+    print_geos_year_coverage(geos_candidates, args, "GEOS candidate years after latitude filter")
+    geos_years = available_geos_years(all_geos_candidates, args)
+    if not geos_years:
+        print("ERROR: no GEOS candidate years are available after the selected filters; cannot slice IBTrACS.", file=sys.stderr)
+        return 1
+    args.comparison_years = geos_years
+    print(f"Slicing IBTrACS and count diagnostics to GEOS-available years: {', '.join(str(year) for year in geos_years)}")
     print(f"Loaded {len(all_geos_candidates):,} GEOS candidate rows in selected years/months.")
     print(f"Using {len(geos_candidates):,} GEOS candidate rows after latitude filter {args.min_lat:.1f} to {args.max_lat:.1f}.")
 
     print(f"Reading IBTrACS: {args.ibtracs}")
-    ibtracs_fixes, wind_samples = read_ibtracs(args)
+    ibtracs_fixes, wind_samples = read_ibtracs(args, allowed_years=set(geos_years))
 
     recomputed_thresholds = quantile_matched_geos_thresholds(
         all_geos_candidates,

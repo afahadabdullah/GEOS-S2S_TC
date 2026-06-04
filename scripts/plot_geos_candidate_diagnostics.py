@@ -60,13 +60,13 @@ BASINS = {
         "lat_range": (0.0, 45.0),
         "lon_range": (100.0, 180.0),
         "color": "#2ec4b6",
-        "label_xy": (140.0, 38.0),
+        "label_xy": (150.0, 30.0),
     },
     "North Indian": {
         "lat_range": (0.0, 40.0),
         "lon_range": (40.0, 100.0),
         "color": "#9b5de5",
-        "label_xy": (70.0, 32.0),
+        "label_xy": (65.0, 17.0),
     },
     "South Indian": {
         "lat_range": (-40.0, 0.0),
@@ -297,6 +297,7 @@ def filter_candidates_by_ocean(candidates: list[Candidate], args: argparse.Names
         args.ocean_mask_source,
         mask_file=args.ocean_mask_file,
         threshold=args.ocean_threshold,
+        require_mask=True,
     )
     print(f"Ocean-only candidate filter enabled: source={checker.source}")
     if warning:
@@ -305,7 +306,7 @@ def filter_candidates_by_ocean(candidates: list[Candidate], args: argparse.Names
     filtered: list[Candidate] = []
     skipped_land = 0
     for candidate in candidates:
-        is_ocean = candidate.over_ocean if candidate.over_ocean is not None else checker.is_ocean(candidate.center_lat, candidate.center_lon)
+        is_ocean = False if candidate.over_ocean is False else checker.is_ocean(candidate.center_lat, candidate.center_lon)
         if is_ocean:
             filtered.append(candidate)
         else:
@@ -313,6 +314,20 @@ def filter_candidates_by_ocean(candidates: list[Candidate], args: argparse.Names
 
     print(f"Skipped {skipped_land:,} GEOS candidate rows over land.")
     return filtered
+
+
+def build_plot_ocean_checker(args: argparse.Namespace):
+    if not args.ocean_only:
+        return None
+    checker, warning = build_ocean_checker(
+        args.ocean_mask_source,
+        mask_file=args.ocean_mask_file,
+        threshold=args.ocean_threshold,
+        require_mask=True,
+    )
+    if warning:
+        print(f"WARNING: ocean mask fallback: {warning}")
+    return checker
 
 
 def read_thresholds(paths: list[Path], ocean_only: bool) -> dict[str, dict[str, float | str]]:
@@ -421,6 +436,14 @@ def map_kwargs(ax) -> dict:
     return {"transform": ccrs.PlateCarree()} if is_cartopy_axis(ax) else {}
 
 
+def draw_land_overlay(ax, zorder: float = 4.0) -> None:
+    if not HAS_CARTOPY:
+        return
+    ax.add_feature(cfeature.LAND, facecolor="#eae6df", zorder=zorder)
+    ax.add_feature(cfeature.COASTLINE, edgecolor="#555555", linewidth=0.5, zorder=zorder + 0.1)
+    ax.add_feature(cfeature.BORDERS, edgecolor="#bbbbbb", linewidth=0.3, linestyle=":", zorder=zorder + 0.1)
+
+
 def create_global_map_figure(dpi: int, title: str, min_lat: float, max_lat: float):
     fig = plt.figure(figsize=(14, 7), dpi=dpi)
     if HAS_CARTOPY:
@@ -459,6 +482,8 @@ def draw_basin_boxes(
     label_text_by_basin: dict[str, str] | None = None,
     min_lat: float | None = None,
     max_lat: float | None = None,
+    line_zorder: float = 4.0,
+    text_zorder: float = 6.0,
 ) -> None:
     for basin_name, basin_def in BASINS.items():
         color = basin_def["color"]
@@ -467,7 +492,7 @@ def draw_basin_boxes(
         for lon_min, lon_max in lon_ranges:
             lons = [lon_min, lon_max, lon_max, lon_min, lon_min]
             lats = [lat_min, lat_min, lat_max, lat_max, lat_min]
-            ax.plot(lons, lats, color=color, linewidth=1.4, alpha=0.85, zorder=4, **map_kwargs(ax))
+            ax.plot(lons, lats, color=color, linewidth=1.4, alpha=0.85, zorder=line_zorder, **map_kwargs(ax))
         label_lon, label_lat = basin_def["label_xy"]
         if min_lat is not None:
             label_lat = max(label_lat, min_lat + 4.0)
@@ -484,7 +509,7 @@ def draw_basin_boxes(
             fontsize=7,
             fontweight="bold",
             bbox=dict(boxstyle="round,pad=0.25", fc="#ffffff", ec=color, lw=0.9, alpha=0.82),
-            zorder=6,
+            zorder=text_zorder,
             **map_kwargs(ax),
         )
 
@@ -508,6 +533,14 @@ def save_figure(fig, path: Path, dpi: int) -> None:
     fig.savefig(path, bbox_inches="tight", dpi=dpi)
     plt.close(fig)
     print(f"  -> Saved {path}")
+
+
+def print_year_coverage(candidates: list[Candidate], label: str = "GEOS candidate years") -> None:
+    years = sorted({candidate.init_date[:4] for candidate in candidates if len(candidate.init_date) >= 4})
+    if years:
+        print(f"{label}: {years[0]}-{years[-1]} ({len(years)} years): {', '.join(years)}")
+    else:
+        print(f"{label}: none")
 
 
 def active_member_keys(candidates: list[Candidate]) -> list[tuple[str, str]]:
@@ -553,9 +586,9 @@ def plot_global_candidate_map(
     max_lat: float,
 ) -> None:
     fig, ax = create_global_map_figure(dpi, "GEOS TC Candidate Locations From Cached Inventory", min_lat, max_lat)
-    draw_basin_boxes(ax, min_lat=min_lat, max_lat=max_lat)
 
     if not candidates:
+        draw_basin_boxes(ax, min_lat=min_lat, max_lat=max_lat)
         no_data_text(ax)
         save_figure(fig, path, dpi)
         return
@@ -596,6 +629,8 @@ def plot_global_candidate_map(
                 **map_kwargs(ax),
             )
 
+    draw_land_overlay(ax, zorder=8.0)
+    draw_basin_boxes(ax, min_lat=min_lat, max_lat=max_lat, line_zorder=9.0, text_zorder=10.0)
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8, frameon=False)
     save_figure(fig, path, dpi)
 
@@ -607,6 +642,7 @@ def plot_global_candidate_density_map(
     min_lat: float,
     max_lat: float,
     bin_deg: float,
+    ocean_checker=None,
 ) -> None:
     fig, ax = create_global_map_figure(dpi, "GEOS TC Candidate Density From Cached Inventory", min_lat, max_lat)
 
@@ -622,9 +658,19 @@ def plot_global_candidate_density_map(
     lons = np.asarray([candidate.center_lon for candidate in candidates], dtype="float64")
     lats = np.asarray([candidate.center_lat for candidate in candidates], dtype="float64")
     counts, _, _ = np.histogram2d(lats, lons, bins=[lat_edges, lon_edges])
-    masked_counts = np.ma.masked_where(counts <= 0.0, counts)
+    masked_out = counts <= 0.0
+    if ocean_checker is not None:
+        lat_centers = 0.5 * (lat_edges[:-1] + lat_edges[1:])
+        lon_centers = 0.5 * (lon_edges[:-1] + lon_edges[1:])
+        ocean_bins = np.zeros_like(counts, dtype=bool)
+        for lat_index, lat_value in enumerate(lat_centers):
+            for lon_index, lon_value in enumerate(lon_centers):
+                ocean_bins[lat_index, lon_index] = ocean_checker.is_ocean(float(lat_value), float(lon_value))
+        masked_out = masked_out | ~ocean_bins
+    masked_counts = np.ma.masked_where(masked_out, counts)
 
-    max_count = float(np.nanmax(counts)) if np.nanmax(counts) > 0 else 1.0
+    visible_counts = np.ma.filled(masked_counts, 0.0)
+    max_count = float(np.nanmax(visible_counts)) if np.nanmax(visible_counts) > 0 else 1.0
     mesh = ax.pcolormesh(
         lon_edges,
         lat_edges,
@@ -635,7 +681,8 @@ def plot_global_candidate_density_map(
         zorder=3,
         **map_kwargs(ax),
     )
-    draw_basin_boxes(ax, min_lat=min_lat, max_lat=max_lat)
+    draw_land_overlay(ax, zorder=6.0)
+    draw_basin_boxes(ax, min_lat=min_lat, max_lat=max_lat, line_zorder=7.0, text_zorder=8.0)
     cbar = fig.colorbar(mesh, ax=ax, orientation="horizontal", pad=0.06, aspect=45, shrink=0.72)
     cbar.set_label(f"Candidate count per {bin_deg:g}deg x {bin_deg:g}deg bin", fontsize=9, fontweight="bold")
     cbar.ax.tick_params(labelsize=8)
@@ -655,8 +702,8 @@ def plot_global_basin_count_map(candidates: list[Candidate], path: Path, dpi: in
             label_text_by_basin[basin_name] = f"{basin_name}\nN={total_count:,}"
 
     fig, ax = create_global_map_figure(dpi, "GEOS TC Candidate Counts by Basin", min_lat, max_lat)
-    draw_basin_boxes(ax, label_text_by_basin, min_lat=min_lat, max_lat=max_lat)
     if not candidates:
+        draw_basin_boxes(ax, label_text_by_basin, min_lat=min_lat, max_lat=max_lat)
         no_data_text(ax)
     else:
         counts = np.asarray([sum(1 for candidate in candidates if candidate.basin_name == basin_name) for basin_name in BASIN_ORDER])
@@ -675,6 +722,8 @@ def plot_global_basin_count_map(candidates: list[Candidate], path: Path, dpi: in
                 zorder=5,
                 **map_kwargs(ax),
             )
+        draw_land_overlay(ax, zorder=6.0)
+        draw_basin_boxes(ax, label_text_by_basin, min_lat=min_lat, max_lat=max_lat, line_zorder=7.0, text_zorder=8.0)
     save_figure(fig, path, dpi)
 
 
@@ -1035,7 +1084,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  - {path}")
     all_candidates = read_candidates(candidate_paths, months)
     all_candidates = filter_candidates_by_ocean(all_candidates, args)
+    print_year_coverage(all_candidates, "GEOS candidate init years after month/ocean filters")
     candidates = filter_candidates_by_latitude(all_candidates, args.min_lat, args.max_lat)
+    print_year_coverage(candidates, "GEOS candidate init years after latitude filter")
     print(f"Loaded {len(all_candidates):,} complete candidate rows.")
     print(f"Using {len(candidates):,} candidate rows after latitude filter {args.min_lat:.1f} to {args.max_lat:.1f}.")
 
@@ -1062,6 +1113,9 @@ def main(argv: list[str] | None = None) -> int:
         prefix = f"{prefix}_{'-'.join(sorted(months))}"
     plot_dir = Path(args.plot_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
+    density_ocean_checker = build_plot_ocean_checker(args)
+    if density_ocean_checker is not None:
+        print(f"Ocean-only density-bin mask enabled: source={density_ocean_checker.source}")
 
     print(f"Writing diagnostics to: {plot_dir}")
     plot_global_candidate_density_map(
@@ -1071,6 +1125,7 @@ def main(argv: list[str] | None = None) -> int:
         args.min_lat,
         args.max_lat,
         args.density_bin_deg,
+        density_ocean_checker,
     )
     plot_global_candidate_map(candidates, thresholds, plot_dir / f"{prefix}_global_candidate_map.png", args.dpi, args.min_lat, args.max_lat)
     plot_global_basin_count_map(candidates, plot_dir / f"{prefix}_global_basin_count_map.png", args.dpi, args.min_lat, args.max_lat)
