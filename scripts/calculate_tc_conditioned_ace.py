@@ -1439,12 +1439,21 @@ def main(argv: list[str] | None = None) -> int:
 
             print(f"SFC files: {len(sfc_files)} | ATM files: {len(atm_files)}")
 
+            # Filter active ATM files first to have correct progress bar totals
+            active_atm_files = []
             for atm_path in atm_files:
                 yyyymm = forecast_yyyymm(atm_path.name, args.atm_collection)
-                if forecast_months and (yyyymm is None or yyyymm[-2:] not in forecast_months):
-                    continue
+                if not forecast_months or (yyyymm is not None and yyyymm[-2:] in forecast_months):
+                    active_atm_files.append(atm_path)
 
-                print(f"  Reading ATM file: {atm_path.name}")
+            total_files = len(active_atm_files)
+            for idx, atm_path in enumerate(active_atm_files):
+                # Update visual progress bar on a single line
+                percent = 100.0 * (idx + 1) / total_files
+                filled_length = int(40 * (idx + 1) // total_files)
+                bar = '█' * filled_length + '-' * (40 - filled_length)
+                sys.stdout.write(f"\r  Reading ATM files |{bar}| {percent:.1f}% ({idx+1}/{total_files}) - {atm_path.name:<60}")
+                sys.stdout.flush()
                 with netCDF4.Dataset(atm_path, "r") as ds:
                     slp_name = find_first_variable(ds, SLP_CANDIDATES)
                     t_name = find_first_variable(ds, T_CANDIDATES)
@@ -1654,6 +1663,10 @@ def main(argv: list[str] | None = None) -> int:
                             basin_diag["qv850_anom_gpkg"].append(float(qv_anom))
                             basin_diag["vort850_s1"].append(float(vort850))
                             basin_diag["ts_threshold_kt"].append(basin_ts_threshold)
+
+            if active_atm_files:
+                sys.stdout.write('\n')
+                sys.stdout.flush()
 
             if not valid_times:
                 print(f"WARNING: No valid ATM/SFC time matches were processed for '{ens_member}'. Skipping cache/plot generation.")
