@@ -35,7 +35,7 @@ ATM_COLLECTION="${ATM_COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
 INIT_DATE="${INIT_DATE:-20200824}"
 INIT_DATES_FILE="${INIT_DATES_FILE:-}"
 ENS="${ENS:-ens1}"
-FORECAST_MONTHS="${FORECAST_MONTHS:-09,10}"
+FORECAST_MONTHS="${FORECAST_MONTHS:-09:10}"
 OBSERVED_PERCENTILES="${OBSERVED_PERCENTILES:-${REPO_ROOT}/data/obs/ibtracs/ibtracs_observed_percentiles.csv}"
 OBSERVED_WIND_VARS="${OBSERVED_WIND_VARS:-usa_wind}"
 OBSERVED_BASIN_METHOD="${OBSERVED_BASIN_METHOD:-boxes}"
@@ -51,6 +51,20 @@ LOCAL_MIN_RADIUS_DEG="${LOCAL_MIN_RADIUS_DEG:-2.0}"
 CENTER_SEARCH_POINTS="${CENTER_SEARCH_POINTS:-200}"
 IGNORE_VORTICITY="${IGNORE_VORTICITY:-0}"
 MAX_INIT_DATES="${MAX_INIT_DATES:-0}"
+RESUME="${RESUME:-0}"
+PROGRESS_PATH="${PROGRESS_PATH:-}"
+AUTO_RESUBMIT="${AUTO_RESUBMIT:-0}"
+RESUBMIT_AFTER_HOURS="${RESUBMIT_AFTER_HOURS:-7.5}"
+RESUBMIT_COUNT="${RESUBMIT_COUNT:-0}"
+MAX_RESUBMITS="${MAX_RESUBMITS:-0}"
+AUTO_RESUBMIT_ACTIVE="${AUTO_RESUBMIT}"
+if [[ "${AUTO_RESUBMIT}" == "1" && "${MAX_RESUBMITS}" != "0" && "${RESUBMIT_COUNT}" -ge "${MAX_RESUBMITS}" ]]; then
+  AUTO_RESUBMIT_ACTIVE="0"
+fi
+STOP_AFTER_HOURS="${STOP_AFTER_HOURS:-0}"
+if [[ "${AUTO_RESUBMIT_ACTIVE}" == "1" && ( "${STOP_AFTER_HOURS}" == "0" || "${STOP_AFTER_HOURS}" == "0.0" ) ]]; then
+  STOP_AFTER_HOURS="${RESUBMIT_AFTER_HOURS}"
+fi
 CONDA_ENV="${CONDA_ENV:-earth}"
 CONDA_BASE="${CONDA_BASE:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
@@ -127,6 +141,124 @@ activate_conda_env() {
   fi
 }
 
+hours_to_seconds() {
+  awk -v hours="$1" 'BEGIN {
+    if (hours < 0) {
+      hours = 0
+    }
+    printf "%d", hours * 3600
+  }'
+}
+
+append_qsub_var() {
+  local name="$1"
+  local value="$2"
+  if [[ -z "${value}" ]]; then
+    return 0
+  fi
+  RESUBMIT_VARS+=("${name}=${value}")
+}
+
+submit_resume_job() {
+  local next_count
+  local qsub_status
+  local varlist
+
+  if [[ -z "${PBS_JOBID:-}" ]]; then
+    echo "WARNING: PBS_JOBID is not set; cannot queue dependent resume job."
+    return 1
+  fi
+  if [[ -n "${RESUBMIT_QUEUED_FLAG:-}" && -f "${RESUBMIT_QUEUED_FLAG}" ]]; then
+    echo "Resume job has already been queued by this job."
+    return 0
+  fi
+
+  next_count=$((RESUBMIT_COUNT + 1))
+  RESUBMIT_VARS=()
+  append_qsub_var "SFC_ROOT" "${SFC_ROOT}"
+  append_qsub_var "ATM_ROOT" "${ATM_ROOT}"
+  append_qsub_var "SFC_COLLECTION" "${SFC_COLLECTION}"
+  append_qsub_var "ATM_COLLECTION" "${ATM_COLLECTION}"
+  append_qsub_var "INIT_DATE" "${INIT_DATE}"
+  append_qsub_var "INIT_DATES_FILE" "${INIT_DATES_FILE}"
+  append_qsub_var "ENS" "${ENS}"
+  append_qsub_var "FORECAST_MONTHS" "${FORECAST_MONTHS}"
+  append_qsub_var "OBSERVED_PERCENTILES" "${OBSERVED_PERCENTILES}"
+  append_qsub_var "OBSERVED_WIND_VARS" "${OBSERVED_WIND_VARS}"
+  append_qsub_var "OBSERVED_BASIN_METHOD" "${OBSERVED_BASIN_METHOD}"
+  append_qsub_var "OUTPUT_DIR" "${OUTPUT_DIR}"
+  append_qsub_var "OUTPUT_PREFIX" "${OUTPUT_PREFIX}"
+  append_qsub_var "SFC_MATCH_TOLERANCE_HOURS" "${SFC_MATCH_TOLERANCE_HOURS}"
+  append_qsub_var "ENVIRONMENT_RADIUS_DEG" "${ENVIRONMENT_RADIUS_DEG}"
+  append_qsub_var "INNER_CORE_RADIUS_DEG" "${INNER_CORE_RADIUS_DEG}"
+  append_qsub_var "WIND_SEARCH_RADIUS_DEG" "${WIND_SEARCH_RADIUS_DEG}"
+  append_qsub_var "MAX_CENTERS_PER_BASIN" "${MAX_CENTERS_PER_BASIN}"
+  append_qsub_var "MIN_CENTER_SEPARATION_DEG" "${MIN_CENTER_SEPARATION_DEG}"
+  append_qsub_var "LOCAL_MIN_RADIUS_DEG" "${LOCAL_MIN_RADIUS_DEG}"
+  append_qsub_var "CENTER_SEARCH_POINTS" "${CENTER_SEARCH_POINTS}"
+  append_qsub_var "IGNORE_VORTICITY" "${IGNORE_VORTICITY}"
+  append_qsub_var "MAX_INIT_DATES" "${MAX_INIT_DATES}"
+  append_qsub_var "RESUME" "1"
+  append_qsub_var "PROGRESS_PATH" "${PROGRESS_PATH}"
+  append_qsub_var "AUTO_RESUBMIT" "${AUTO_RESUBMIT}"
+  append_qsub_var "RESUBMIT_AFTER_HOURS" "${RESUBMIT_AFTER_HOURS}"
+  append_qsub_var "RESUBMIT_COUNT" "${next_count}"
+  append_qsub_var "MAX_RESUBMITS" "${MAX_RESUBMITS}"
+  append_qsub_var "STOP_AFTER_HOURS" "${STOP_AFTER_HOURS}"
+  append_qsub_var "CONDA_ENV" "${CONDA_ENV}"
+  append_qsub_var "CONDA_BASE" "${CONDA_BASE}"
+  append_qsub_var "PYTHON_BIN" "${PYTHON_BIN}"
+
+  varlist="$(IFS=,; echo "${RESUBMIT_VARS[*]}")"
+  echo "Submitting resume job after current job exits: qsub -W depend=afterany:${PBS_JOBID} -v ${varlist} ${REPO_ROOT}/scripts/submit_geos_candidate_thresholds.pbs"
+  qsub -W "depend=afterany:${PBS_JOBID}" -v "${varlist}" "${REPO_ROOT}/scripts/submit_geos_candidate_thresholds.pbs"
+  qsub_status=$?
+  if (( qsub_status == 0 )); then
+    if [[ -n "${RESUBMIT_QUEUED_FLAG:-}" ]]; then
+      touch "${RESUBMIT_QUEUED_FLAG}" 2>/dev/null || true
+    fi
+  fi
+  return "${qsub_status}"
+}
+
+start_resubmit_watchdog() {
+  local delay_seconds
+
+  if [[ "${AUTO_RESUBMIT_ACTIVE}" != "1" ]]; then
+    return 0
+  fi
+  if [[ -z "${PBS_JOBID:-}" ]]; then
+    echo "WARNING: AUTO_RESUBMIT=1 but PBS_JOBID is not set; resume job will not be queued automatically."
+    return 0
+  fi
+  RESUBMIT_DONE_FLAG="${TMPDIR:-/tmp}/geos_tc_thresh_done_${PBS_JOBID}"
+  RESUBMIT_QUEUED_FLAG="${TMPDIR:-/tmp}/geos_tc_thresh_resume_queued_${PBS_JOBID}"
+  rm -f "${RESUBMIT_DONE_FLAG}"
+  rm -f "${RESUBMIT_QUEUED_FLAG}"
+  delay_seconds="$(hours_to_seconds "${RESUBMIT_AFTER_HOURS}")"
+  (
+    sleep "${delay_seconds}"
+    if [[ -f "${RESUBMIT_DONE_FLAG}" ]]; then
+      exit 0
+    fi
+    echo "AUTO_RESUBMIT timer passed after ${RESUBMIT_AFTER_HOURS} hours at $(date)."
+    submit_resume_job
+  ) &
+  RESUBMIT_WATCHDOG_PID=$!
+  echo "AUTO_RESUBMIT watchdog started: pid=${RESUBMIT_WATCHDOG_PID}, delay_seconds=${delay_seconds}, resume_count=${RESUBMIT_COUNT}"
+}
+
+cleanup_resubmit_watchdog() {
+  if [[ -n "${RESUBMIT_DONE_FLAG:-}" ]]; then
+    touch "${RESUBMIT_DONE_FLAG}" 2>/dev/null || true
+  fi
+  if [[ -n "${RESUBMIT_WATCHDOG_PID:-}" ]] && kill -0 "${RESUBMIT_WATCHDOG_PID}" 2>/dev/null; then
+    kill "${RESUBMIT_WATCHDOG_PID}" 2>/dev/null || true
+  fi
+}
+
+trap cleanup_resubmit_watchdog EXIT
+
 echo "Job started: $(date)"
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "SFC_ROOT=${SFC_ROOT}"
@@ -147,6 +279,14 @@ echo "MIN_CENTER_SEPARATION_DEG=${MIN_CENTER_SEPARATION_DEG}"
 echo "LOCAL_MIN_RADIUS_DEG=${LOCAL_MIN_RADIUS_DEG}"
 echo "CENTER_SEARCH_POINTS=${CENTER_SEARCH_POINTS}"
 echo "IGNORE_VORTICITY=${IGNORE_VORTICITY}"
+echo "RESUME=${RESUME}"
+echo "PROGRESS_PATH=${PROGRESS_PATH}"
+echo "AUTO_RESUBMIT=${AUTO_RESUBMIT}"
+echo "AUTO_RESUBMIT_ACTIVE=${AUTO_RESUBMIT_ACTIVE}"
+echo "RESUBMIT_AFTER_HOURS=${RESUBMIT_AFTER_HOURS}"
+echo "RESUBMIT_COUNT=${RESUBMIT_COUNT}"
+echo "MAX_RESUBMITS=${MAX_RESUBMITS}"
+echo "STOP_AFTER_HOURS=${STOP_AFTER_HOURS}"
 echo "CONDA_ENV=${CONDA_ENV}"
 echo "CONDA_BASE=${CONDA_BASE:-auto}"
 
@@ -182,6 +322,8 @@ if (( dep_status != 0 )); then
   echo "ERROR Python dependency check failed in CONDA_ENV=${CONDA_ENV}"
   exit 8
 fi
+
+start_resubmit_watchdog
 
 cmd=(
   "${PYTHON_BIN}" -u scripts/calculate_geos_candidate_thresholds.py
@@ -223,9 +365,28 @@ if [[ "${MAX_INIT_DATES}" != "0" ]]; then
   cmd+=(--max-init-dates "${MAX_INIT_DATES}")
 fi
 
+if [[ "${RESUME}" == "1" ]]; then
+  cmd+=(--resume)
+fi
+
+if [[ -n "${PROGRESS_PATH}" ]]; then
+  cmd+=(--progress-path "${PROGRESS_PATH}")
+fi
+
+if [[ "${STOP_AFTER_HOURS}" != "0" && "${STOP_AFTER_HOURS}" != "0.0" ]]; then
+  cmd+=(--stop-after-hours "${STOP_AFTER_HOURS}")
+fi
+
 echo "Running: ${cmd[*]}"
 "${cmd[@]}"
 status=$?
+
+if [[ "${AUTO_RESUBMIT_ACTIVE}" == "1" && "${status}" == "75" ]]; then
+  echo "Python stopped cleanly after STOP_AFTER_HOURS=${STOP_AFTER_HOURS}; queueing resume job."
+  if submit_resume_job; then
+    status=0
+  fi
+fi
 
 echo "Job finished: $(date)"
 echo "Exit status: ${status}"
