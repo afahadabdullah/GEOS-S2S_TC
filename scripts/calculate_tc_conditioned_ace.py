@@ -22,6 +22,7 @@ This script is a unified master pipeline that:
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 import os
 import re
@@ -31,6 +32,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+
+if "MPLCONFIGDIR" not in os.environ:
+    mpl_config_dir = Path(os.environ.get("TMPDIR", "/tmp")) / "geos_s2s_tc_mpl"
+    mpl_config_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["MPLCONFIGDIR"] = str(mpl_config_dir)
 
 import matplotlib
 matplotlib.use("Agg")
@@ -57,6 +63,7 @@ DEFAULT_SFC_COLLECTION = "sfc_tavg_3hr_glo_L720x361_sfc"
 DEFAULT_ATM_COLLECTION = "atm_inst_6hr_glo_L720x361_p49"
 DEFAULT_CACHE_DIR = "data/cache"
 DEFAULT_PLOT_DIR = "plots"
+DEFAULT_THRESHOLD_COLUMN = "geos_threshold_kt"
 
 MPS_TO_KNOTS = 1.94384
 EARTH_RADIUS_M = 6_371_000.0
@@ -124,6 +131,85 @@ def parse_list(value: str | None) -> list[str]:
     if not value:
         return []
     return [item for item in re.split(r"[\s,:]+", value.strip()) if item]
+
+
+def parse_float(value: str | None) -> float:
+    if value is None or value == "":
+        return float("nan")
+    try:
+        return float(value)
+    except ValueError:
+        return float("nan")
+
+
+def basin_threshold_signature(thresholds: dict[str, float]) -> str:
+    return ";".join(f"{basin_name}={float(thresholds.get(basin_name, np.nan)):.4f}" for basin_name in BASINS)
+
+
+def load_basin_thresholds(
+    path: Path | None,
+    fallback_threshold: float,
+    wind_var: str = "usa_wind",
+    basin_method: str = "boxes",
+    threshold_column: str = "auto",
+) -> tuple[dict[str, float], str, str]:
+    thresholds = {basin_name: float(fallback_threshold) for basin_name in BASINS}
+    if path is None:
+        return thresholds, "fixed", f"fixed:{fallback_threshold:.2f}kt"
+
+    if not path.exists():
+        raise FileNotFoundError(f"Threshold CSV does not exist: {path}")
+
+    source_columns = (DEFAULT_THRESHOLD_COLUMN, "count_match_threshold_kt", "T_geos") if threshold_column == "auto" else (threshold_column,)
+    loaded: set[str] = set()
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            basin_name = row.get("basin_name", "")
+            if basin_name not in BASINS:
+                continue
+            if row.get("observed_wind_var") and row.get("observed_wind_var") != wind_var:
+                continue
+            if row.get("observed_basin_method") and row.get("observed_basin_method") != basin_method:
+                continue
+
+            threshold = float("nan")
+            for column in source_columns:
+                threshold = parse_float(row.get(column))
+                if np.isfinite(threshold):
+                    break
+            if not np.isfinite(threshold):
+                continue
+
+            thresholds[basin_name] = float(threshold)
+            loaded.add(basin_name)
+
+    missing = [basin_name for basin_name in BASINS if basin_name not in loaded]
+    source = str(path)
+    if missing:
+        print(
+            "WARNING: threshold CSV missing finite values for "
+            f"{', '.join(missing)}; using fallback {fallback_threshold:.2f} kt for those basins."
+        )
+    return thresholds, "basin", source
+
+
+def print_thresholds(thresholds: dict[str, float], mode: str, source: str) -> None:
+    print(f"TC Wind Threshold Mode: {mode}")
+    print(f"TC Wind Threshold Source: {source}")
+    for basin_name in BASINS:
+        print(f"  {basin_name:18s} {thresholds[basin_name]:6.2f} kt")
+
+
+def cache_threshold_signature(cache_path: Path) -> str | None:
+    if not cache_path.exists():
+        return None
+    try:
+        with netCDF4.Dataset(cache_path, "r") as ds:
+            value = getattr(ds, "ts_threshold_signature", None)
+            return str(value) if value is not None else None
+    except Exception:
+        return None
 
 
 def to_datetime(value) -> datetime:
@@ -523,6 +609,9 @@ def write_cache(
     diagnostics: dict[str, dict[str, list[float]]],
     uses_vorticity: bool,
     local_ace_monthly: dict[str, np.ndarray] | None = None,
+    basin_thresholds: dict[str, float] | None = None,
+    threshold_mode: str = "fixed",
+    threshold_source: str = "",
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -611,11 +700,20 @@ def write_cache(
                     var.units = "g kg-1"
                 elif field_name == "vort850_s1":
                     var.units = "s-1"
+                elif field_name == "ts_threshold_kt":
+                    var.units = "kt"
+                    var.long_name = f"ACE wind threshold for {basin_name}"
 
         ds.title = "TC-conditioned ACE diagnostics"
         ds.source_initialization = init_date
         ds.source_ensemble = ens
         ds.uses_vorticity = "true" if uses_vorticity else "false"
+        if basin_thresholds is not None:
+            ds.ts_threshold_mode = threshold_mode
+            ds.ts_threshold_source = threshold_source
+            ds.ts_threshold_signature = basin_threshold_signature(basin_thresholds)
+            for basin_name, threshold in basin_thresholds.items():
+                ds.setncattr(f"ts_threshold_kt_{safe_name(basin_name)}", float(threshold))
         ds.comment = (
             "Unified ACE proxy using SFC wind intensity gated by ATM structure: "
             "SLP minimum, warm-core anomaly, low-level moisture anomaly, and optional 850-hPa vorticity sign."
@@ -659,11 +757,26 @@ def read_cache(cache_path: Path) -> tuple[str, str, np.ndarray, np.ndarray, list
                 "warm_core_anom_k",
                 "qv850_anom_gpkg",
                 "vort850_s1",
+                "ts_threshold_kt",
             ):
                 var_name = f"{field_name}_{basin_key}"
-                diagnostics[basin_name][field_name] = np.asarray(ds.variables[var_name][:])
+                if var_name in ds.variables:
+                    diagnostics[basin_name][field_name] = np.asarray(ds.variables[var_name][:])
+                else:
+                    fill_value = float(getattr(ds, f"ts_threshold_kt_{basin_key}", np.nan)) if field_name == "ts_threshold_kt" else np.nan
+                    diagnostics[basin_name][field_name] = np.full(len(times), fill_value, dtype="float64")
 
     return init_date, ens, latitudes, longitudes, times, local_ace, diagnostics, uses_vorticity, local_ace_monthly
+
+
+def thresholds_from_diagnostics(diagnostics: dict[str, dict[str, np.ndarray]]) -> dict[str, float]:
+    thresholds: dict[str, float] = {}
+    for basin_name in BASINS:
+        values = np.asarray(diagnostics.get(basin_name, {}).get("ts_threshold_kt", []), dtype="float64")
+        values = values[np.isfinite(values)]
+        if values.size:
+            thresholds[basin_name] = float(values[0])
+    return thresholds
 
 
 def plot_ace_diagnostics(
@@ -677,6 +790,7 @@ def plot_ace_diagnostics(
     plot_dir: Path,
     basin_cumulative_ace: dict[str, np.ndarray] | None = None,
     local_ace_monthly: dict[str, np.ndarray] | None = None,
+    basin_thresholds: dict[str, float] | None = None,
 ) -> None:
     """Generate and save premium, publication-quality diagnostic plots.
 
@@ -702,6 +816,7 @@ def plot_ace_diagnostics(
     sorted_idx = np.argsort(lons_shifted)
     lons_plot = lons_shifted[sorted_idx]
     ace_plot = local_ace[:, sorted_idx]
+    threshold_caption = "Basin-dependent GEOS thresholds" if basin_thresholds else "Fixed wind threshold"
 
     # --------------------------------------------------------------------------
     # PLOT 1: SPATIAL TC-CONDITIONED ACE MAP (NORTH ATLANTIC FOCUS)
@@ -752,7 +867,7 @@ def plot_ace_diagnostics(
     
     plt.title(
         f"GEOS S2S3 TC-Conditioned Local Accumulated Cyclone Energy (ACE) Map\n"
-        f"Initialization: {init_date}  |  Member: {ens}  |  Season: Sep-Nov",
+        f"Initialization: {init_date}  |  Member: {ens}  |  Season: Sep-Nov  |  {threshold_caption}",
         fontsize=12, fontweight="bold", pad=15, color="#1e222a"
     )
     
@@ -784,7 +899,12 @@ def plot_ace_diagnostics(
     
     ax2.set_title(
         f"S2S3 North Atlantic Cumulative TC-Conditioned ACE Curve\n"
-        f"Initialization: {init_date}  |  Ensemble: {ens}",
+        f"Initialization: {init_date}  |  Ensemble: {ens}"
+        + (
+            f"  |  T={basin_thresholds['North Atlantic']:.1f} kt"
+            if basin_thresholds and "North Atlantic" in basin_thresholds
+            else ""
+        ),
         fontsize=12, fontweight="bold", pad=15, color="#1e222a"
     )
     
@@ -873,15 +993,17 @@ def plot_ace_diagnostics(
         bbox_props = dict(boxstyle="round,pad=0.3", fc="#ffffff", ec=color, lw=1.2, alpha=0.9)
         
         if HAS_CARTOPY:
+            threshold_text = f"\nT: {basin_thresholds[name]:.1f} kt" if basin_thresholds and name in basin_thresholds else ""
             ax3.text(
-                label_lon, label_lat, f"{name}\nACE: {total_ace:.2f}",
+                label_lon, label_lat, f"{name}\nACE: {total_ace:.2f}{threshold_text}",
                 transform=ccrs.PlateCarree(),
                 color="#1e222a", fontsize=8, fontweight="bold",
                 ha="center", va="center", bbox=bbox_props, zorder=6
             )
         else:
+            threshold_text = f"\nT: {basin_thresholds[name]:.1f} kt" if basin_thresholds and name in basin_thresholds else ""
             ax3.text(
-                label_lon, label_lat, f"{name}\nACE: {total_ace:.2f}",
+                label_lon, label_lat, f"{name}\nACE: {total_ace:.2f}{threshold_text}",
                 color="#1e222a", fontsize=8, fontweight="bold",
                 ha="center", va="center", bbox=bbox_props, zorder=6
             )
@@ -893,7 +1015,7 @@ def plot_ace_diagnostics(
     
     plt.title(
         f"GEOS S2S3 Global Multi-Basin TC-Conditioned Accumulated Cyclone Energy (ACE) Map\n"
-        f"Initialization: {init_date}  |  Ensemble: {ens}  |  Season: Sep-Nov",
+        f"Initialization: {init_date}  |  Ensemble: {ens}  |  Season: Sep-Nov  |  {threshold_caption}",
         fontsize=13, fontweight="bold", pad=15, color="#1e222a"
     )
     
@@ -1001,7 +1123,12 @@ def plot_ace_diagnostics(
         # Super title
         fig4.suptitle(
             f"GEOS S2S3 TC-Conditioned Local ACE Monthly Comparison (North Atlantic)\n"
-            f"Initialization: {init_date}  |  Member: {ens}",
+            f"Initialization: {init_date}  |  Member: {ens}"
+            + (
+                f"  |  T={basin_thresholds['North Atlantic']:.1f} kt"
+                if basin_thresholds and "North Atlantic" in basin_thresholds
+                else ""
+            ),
             fontsize=13, fontweight="bold", y=0.96, color="#1e222a"
         )
         
@@ -1067,6 +1194,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     )
     parser.add_argument(
+        "--geos-thresholds",
+        default="",
+        help="Optional basin-dependent GEOS threshold CSV from calculate_geos_candidate_thresholds.py.",
+    )
+    parser.add_argument(
+        "--threshold-wind-var",
+        default="usa_wind",
+        help="Observed wind variable selector for threshold CSV rows. Default: usa_wind.",
+    )
+    parser.add_argument(
+        "--threshold-basin-method",
+        default="boxes",
+        help="Observed basin method selector for threshold CSV rows. Default: boxes.",
+    )
+    parser.add_argument(
+        "--threshold-column",
+        default="auto",
+        help="Threshold column to read. auto tries geos_threshold_kt, count_match_threshold_kt, then T_geos.",
+    )
+    parser.add_argument(
+        "--force-recompute",
+        action="store_true",
+        help="Recompute ACE caches even if matching cache files already exist.",
+    )
+    parser.add_argument(
         "--plot-individual",
         action="store_true",
         help="Generate visual diagnostic plots for each individual ensemble member (default: False)",
@@ -1077,9 +1229,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     plot_dir = Path(args.plot_dir)
+    threshold_csv = Path(args.geos_thresholds) if args.geos_thresholds else None
+    basin_thresholds, threshold_mode, threshold_source = load_basin_thresholds(
+        threshold_csv,
+        fallback_threshold=args.ts_threshold,
+        wind_var=args.threshold_wind_var,
+        basin_method=args.threshold_basin_method,
+        threshold_column=args.threshold_column,
+    )
+    threshold_signature = basin_threshold_signature(basin_thresholds)
     
     if args.plot_only_cache:
         init_date, ens, latitudes, longitudes, times, local_ace, diagnostics, uses_vorticity, local_ace_monthly = read_cache(Path(args.plot_only_cache))
+        cache_thresholds = thresholds_from_diagnostics(diagnostics)
+        if threshold_csv is not None and not cache_thresholds:
+            print(
+                "ERROR: --plot-only-cache has no threshold metadata. "
+                "Rerun without --plot-only-cache so ACE can be rebuilt with --geos-thresholds.",
+                file=sys.stderr,
+            )
+            return 1
+        if threshold_csv is not None and basin_threshold_signature(basin_thresholds) != basin_threshold_signature(cache_thresholds):
+            print(
+                "ERROR: --plot-only-cache cannot recalculate ACE with new thresholds. "
+                "Rerun without --plot-only-cache so the cache can be rebuilt.",
+                file=sys.stderr,
+            )
+            return 1
+        if not cache_thresholds:
+            print("WARNING: cache has no basin threshold metadata; plot labels will not show calibrated thresholds.")
         basin_cumulative_ace = {basin_name: data["cumulative_ace"] for basin_name, data in diagnostics.items()}
         plot_ace_diagnostics(
             local_ace=local_ace,
@@ -1092,6 +1270,7 @@ def main(argv: list[str] | None = None) -> int:
             plot_dir=plot_dir,
             basin_cumulative_ace=basin_cumulative_ace,
             local_ace_monthly=local_ace_monthly,
+            basin_thresholds=cache_thresholds or None,
         )
         return 0
 
@@ -1119,7 +1298,7 @@ def main(argv: list[str] | None = None) -> int:
     print("GEOS S2S3 UNIFIED TC-CONDITIONED ACE DIAGNOSTICS")
     print(f"Initialization: {args.init_date}")
     print(f"Target Ensembles: {', '.join(ens_list)}")
-    print(f"TC Wind Threshold: {args.ts_threshold:.1f} kt")
+    print_thresholds(basin_thresholds, threshold_mode, threshold_source)
     print("=" * 80)
 
     processed_count = 0
@@ -1132,10 +1311,22 @@ def main(argv: list[str] | None = None) -> int:
 
         # Check if cache file already exists and load it if it does
         member_cache_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_{ens_member}.nc4"
-        if member_cache_path.is_file():
-            print(f"[Cache] Found existing cache for '{ens_member}': {member_cache_path.name}")
+        cache_matches = False
+        if member_cache_path.is_file() and not args.force_recompute:
+            cache_signature = cache_threshold_signature(member_cache_path)
+            cache_matches = cache_signature == threshold_signature
+            if cache_signature is None and threshold_mode == "fixed" and args.ts_threshold == TS_THRESHOLD_KNOTS_DEFAULT:
+                cache_matches = True
+            if not cache_matches:
+                print(f"[Cache] Existing cache threshold signature differs for '{ens_member}'; recomputing {member_cache_path.name}")
+            else:
+                print(f"[Cache] Found matching cache for '{ens_member}': {member_cache_path.name}")
+        elif member_cache_path.is_file() and args.force_recompute:
+            print(f"[Cache] Forcing recompute for '{ens_member}': {member_cache_path.name}")
+        if member_cache_path.is_file() and cache_matches:
             try:
                 c_init, c_ens, c_lats, c_lons, c_times, c_local_ace, c_diag, c_vort, c_monthly = read_cache(member_cache_path)
+                cache_thresholds = thresholds_from_diagnostics(c_diag)
                 if args.plot_individual:
                     print(f"[Cache] Successfully loaded cached diagnostics. Regenerating plots to ensure completeness...")
                     # Regenerate plots in case styling updated
@@ -1151,6 +1342,7 @@ def main(argv: list[str] | None = None) -> int:
                         plot_dir=plot_dir,
                         basin_cumulative_ace=basin_cumulative_ace,
                         local_ace_monthly=c_monthly,
+                        basin_thresholds=cache_thresholds or basin_thresholds,
                     )
                 else:
                     print(f"[Cache] Successfully loaded cached diagnostics for '{ens_member}'. Skipping individual plots.")
@@ -1221,6 +1413,7 @@ def main(argv: list[str] | None = None) -> int:
                     "warm_core_anom_k": [],
                     "qv850_anom_gpkg": [],
                     "vort850_s1": [],
+                    "ts_threshold_kt": [],
                 }
                 for basin_name in BASINS
             }
@@ -1295,6 +1488,7 @@ def main(argv: list[str] | None = None) -> int:
                         valid_times.append(valid_time)
 
                         for basin_name, basin_def in BASINS.items():
+                            basin_ts_threshold = float(basin_thresholds[basin_name])
                             if not basin_coverage[basin_name]:
                                 basin_diag = diagnostics[basin_name]
                                 basin_diag["cumulative_ace"].append(basin_totals[basin_name])
@@ -1308,6 +1502,7 @@ def main(argv: list[str] | None = None) -> int:
                                 basin_diag["warm_core_anom_k"].append(float("nan"))
                                 basin_diag["qv850_anom_gpkg"].append(float("nan"))
                                 basin_diag["vort850_s1"].append(float("nan"))
+                                basin_diag["ts_threshold_kt"].append(basin_ts_threshold)
                                 continue
 
                             # Robust candidate evaluation with exception handling to prevent crashes
@@ -1330,6 +1525,7 @@ def main(argv: list[str] | None = None) -> int:
                                 basin_diag["warm_core_anom_k"].append(float("nan"))
                                 basin_diag["qv850_anom_gpkg"].append(float("nan"))
                                 basin_diag["vort850_s1"].append(float("nan"))
+                                basin_diag["ts_threshold_kt"].append(basin_ts_threshold)
                                 continue
 
                             slp_env = annulus_mean(
@@ -1392,7 +1588,7 @@ def main(argv: list[str] | None = None) -> int:
                                     lat_radius=lat_wind_radius,
                                     lon_radius=lon_wind_radius,
                                     search_radius_deg=args.wind_search_radius_deg,
-                                    ts_threshold_knots=args.ts_threshold,
+                                    ts_threshold_knots=basin_ts_threshold,
                                     scale_step=scale_step,
                                 )
                                 
@@ -1409,12 +1605,12 @@ def main(argv: list[str] | None = None) -> int:
                                         lat_radius=lat_wind_radius,
                                         lon_radius=lon_wind_radius,
                                         search_radius_deg=args.wind_search_radius_deg,
-                                        ts_threshold_knots=args.ts_threshold,
+                                        ts_threshold_knots=basin_ts_threshold,
                                         scale_step=scale_step,
                                     )
                                 
                                 # Increment integrated temporal curves using vmax within storm radius
-                                if np.isfinite(vmax_kt) and vmax_kt >= args.ts_threshold:
+                                if np.isfinite(vmax_kt) and vmax_kt >= basin_ts_threshold:
                                     step_ace = float(vmax_kt**2 * scale_step)
                             else:
                                 # Evaluated peak wind for metadata diagnostics, even if rejected by structure gate
@@ -1441,13 +1637,28 @@ def main(argv: list[str] | None = None) -> int:
                             basin_diag["warm_core_anom_k"].append(float(warm_anom))
                             basin_diag["qv850_anom_gpkg"].append(float(qv_anom))
                             basin_diag["vort850_s1"].append(float(vort850))
+                            basin_diag["ts_threshold_kt"].append(basin_ts_threshold)
 
             if not valid_times:
                 print(f"WARNING: No valid ATM/SFC time matches were processed for '{ens_member}'. Skipping cache/plot generation.")
                 continue
 
             output_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_{ens_member}.nc4"
-            write_cache(output_path, args.init_date, ens_member, latitudes, longitudes, valid_times, local_ace, diagnostics, uses_vorticity, local_ace_monthly)
+            write_cache(
+                output_path,
+                args.init_date,
+                ens_member,
+                latitudes,
+                longitudes,
+                valid_times,
+                local_ace,
+                diagnostics,
+                uses_vorticity,
+                local_ace_monthly,
+                basin_thresholds=basin_thresholds,
+                threshold_mode=threshold_mode,
+                threshold_source=threshold_source,
+            )
             
             # Load curves to plot
             basin_cumulative_ace = {name: np.array(data["cumulative_ace"]) for name, data in diagnostics.items()}
@@ -1463,6 +1674,7 @@ def main(argv: list[str] | None = None) -> int:
                     plot_dir=plot_dir,
                     basin_cumulative_ace=basin_cumulative_ace,
                     local_ace_monthly=local_ace_monthly,
+                    basin_thresholds=basin_thresholds,
                 )
 
             # Convert diagnostics to np.asarray values for consistency with c_diag loaded from NetCDF
@@ -1548,6 +1760,9 @@ def main(argv: list[str] | None = None) -> int:
         mean_diagnostics,
         any_uses_vorticity,
         mean_local_ace_monthly,
+        basin_thresholds=basin_thresholds,
+        threshold_mode=threshold_mode,
+        threshold_source=threshold_source,
     )
     
     # Load cumulative curves to plot
@@ -1563,6 +1778,7 @@ def main(argv: list[str] | None = None) -> int:
         plot_dir=plot_dir,
         basin_cumulative_ace=basin_cumulative_ace,
         local_ace_monthly=mean_local_ace_monthly,
+        basin_thresholds=basin_thresholds,
     )
 
     print("=" * 80)

@@ -24,7 +24,7 @@ if str(scripts_dir) not in sys.path:
     sys.path.append(str(scripts_dir))
 
 try:
-    from calculate_tc_conditioned_ace import read_cache, write_cache, plot_ace_diagnostics, BASINS
+    from calculate_tc_conditioned_ace import read_cache, write_cache, plot_ace_diagnostics, thresholds_from_diagnostics, BASINS
 except ImportError as e:
     print(f"ERROR: Could not import calculate_tc_conditioned_ace.py: {e}")
     sys.exit(1)
@@ -141,7 +141,8 @@ def fuse_year_lagged_ensemble(
             "slp_anom_hpa": [],
             "warm_core_anom_k": [],
             "qv850_anom_gpkg": [],
-            "vort850_s1": []
+            "vort850_s1": [],
+            "ts_threshold_kt": [],
         }
 
     # Populate fused diagnostics by averaging at each timestamp
@@ -171,6 +172,7 @@ def fuse_year_lagged_ensemble(
         fused_diagnostics_np[basin_name] = {}
         for field, values in fused_diagnostics[basin_name].items():
             fused_diagnostics_np[basin_name][field] = np.array(values, dtype="float32")
+    basin_thresholds = thresholds_from_diagnostics(fused_diagnostics_np)
 
     # Metadata parameters
     uses_vorticity = any(member_uses_vorticity)
@@ -191,6 +193,9 @@ def fuse_year_lagged_ensemble(
         diagnostics=fused_diagnostics, # write_cache expects lists
         uses_vorticity=uses_vorticity,
         local_ace_monthly=fused_local_ace_monthly,
+        basin_thresholds=basin_thresholds or None,
+        threshold_mode="lagged_fused",
+        threshold_source="input member caches",
     )
 
     # 7. Generate publication-quality fused maps and plots
@@ -206,6 +211,7 @@ def fuse_year_lagged_ensemble(
         plot_dir=plot_dir,
         basin_cumulative_ace={basin: data["cumulative_ace"] for basin, data in fused_diagnostics_np.items()},
         local_ace_monthly=fused_local_ace_monthly,
+        basin_thresholds=basin_thresholds or None,
     )
     print("Lagged Ensemble Fusion completed successfully!")
     print("=" * 80 + "\n")
