@@ -65,6 +65,36 @@ STOP_AFTER_HOURS="${STOP_AFTER_HOURS:-0}"
 if [[ "${AUTO_RESUBMIT_ACTIVE}" == "1" && ( "${STOP_AFTER_HOURS}" == "0" || "${STOP_AFTER_HOURS}" == "0.0" ) ]]; then
   STOP_AFTER_HOURS="${RESUBMIT_AFTER_HOURS}"
 fi
+RUN_CANDIDATE_DIAGNOSTICS="${RUN_CANDIDATE_DIAGNOSTICS:-0}"
+CANDIDATE_DIAG_CANDIDATES="${CANDIDATE_DIAG_CANDIDATES:-}"
+CANDIDATE_DIAG_THRESHOLDS="${CANDIDATE_DIAG_THRESHOLDS:-}"
+CANDIDATE_DIAG_OBSERVED_PERCENTILES="${CANDIDATE_DIAG_OBSERVED_PERCENTILES:-${OBSERVED_PERCENTILES}}"
+CANDIDATE_DIAG_OBSERVED_WIND_VAR="${CANDIDATE_DIAG_OBSERVED_WIND_VAR:-${OBSERVED_WIND_VARS%%,*}}"
+CANDIDATE_DIAG_OBSERVED_BASIN_METHOD="${CANDIDATE_DIAG_OBSERVED_BASIN_METHOD:-${OBSERVED_BASIN_METHOD}}"
+CANDIDATE_DIAG_MONTHS="${CANDIDATE_DIAG_MONTHS:-${FORECAST_MONTHS}}"
+CANDIDATE_DIAG_MIN_LAT="${CANDIDATE_DIAG_MIN_LAT:--25}"
+CANDIDATE_DIAG_MAX_LAT="${CANDIDATE_DIAG_MAX_LAT:-50}"
+CANDIDATE_DIAG_PLOT_DIR="${CANDIDATE_DIAG_PLOT_DIR:-${REPO_ROOT}/plots/geos_candidate_diagnostics}"
+CANDIDATE_DIAG_PREFIX="${CANDIDATE_DIAG_PREFIX:-}"
+CANDIDATE_DIAG_DPI="${CANDIDATE_DIAG_DPI:-300}"
+CANDIDATE_DIAG_DENSITY_BIN_DEG="${CANDIDATE_DIAG_DENSITY_BIN_DEG:-2.0}"
+RUN_COUNT_DIAGNOSTICS="${RUN_COUNT_DIAGNOSTICS:-0}"
+COUNT_DIAG_CANDIDATES="${COUNT_DIAG_CANDIDATES:-}"
+COUNT_DIAG_IBTRACS="${COUNT_DIAG_IBTRACS:-${REPO_ROOT}/data/obs/ibtracs/IBTrACS.since1980.v04r01.nc}"
+COUNT_DIAG_START_YEAR="${COUNT_DIAG_START_YEAR:-1991}"
+COUNT_DIAG_END_YEAR="${COUNT_DIAG_END_YEAR:-2024}"
+COUNT_DIAG_MONTHS="${COUNT_DIAG_MONTHS:-${FORECAST_MONTHS}}"
+COUNT_DIAG_WIND_VAR="${COUNT_DIAG_WIND_VAR:-usa_wind}"
+COUNT_DIAG_THRESHOLD_KT="${COUNT_DIAG_THRESHOLD_KT:-34}"
+COUNT_DIAG_NATURE_FILTER="${COUNT_DIAG_NATURE_FILTER:-TS}"
+COUNT_DIAG_OBSERVED_COUNT_METRIC="${COUNT_DIAG_OBSERVED_COUNT_METRIC:-active_time}"
+COUNT_DIAG_THRESHOLD_SOURCE="${COUNT_DIAG_THRESHOLD_SOURCE:-recompute}"
+COUNT_DIAG_MIN_LAT="${COUNT_DIAG_MIN_LAT:--25}"
+COUNT_DIAG_MAX_LAT="${COUNT_DIAG_MAX_LAT:-50}"
+COUNT_DIAG_EXPECTED_MEMBERS_PER_YEAR="${COUNT_DIAG_EXPECTED_MEMBERS_PER_YEAR:-0}"
+COUNT_DIAG_OUTPUT_DIR="${COUNT_DIAG_OUTPUT_DIR:-${OUTPUT_DIR}/count_comparison}"
+COUNT_DIAG_PLOT_DIR="${COUNT_DIAG_PLOT_DIR:-${REPO_ROOT}/plots/geos_ibtracs_count_comparison}"
+COUNT_DIAG_PREFIX="${COUNT_DIAG_PREFIX:-}"
 CONDA_ENV="${CONDA_ENV:-earth}"
 CONDA_BASE="${CONDA_BASE:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
@@ -205,6 +235,36 @@ submit_resume_job() {
   append_qsub_var "RESUBMIT_COUNT" "${next_count}"
   append_qsub_var "MAX_RESUBMITS" "${MAX_RESUBMITS}"
   append_qsub_var "STOP_AFTER_HOURS" "${STOP_AFTER_HOURS}"
+  append_qsub_var "RUN_CANDIDATE_DIAGNOSTICS" "${RUN_CANDIDATE_DIAGNOSTICS}"
+  append_qsub_var "CANDIDATE_DIAG_CANDIDATES" "${CANDIDATE_DIAG_CANDIDATES}"
+  append_qsub_var "CANDIDATE_DIAG_THRESHOLDS" "${CANDIDATE_DIAG_THRESHOLDS}"
+  append_qsub_var "CANDIDATE_DIAG_OBSERVED_PERCENTILES" "${CANDIDATE_DIAG_OBSERVED_PERCENTILES}"
+  append_qsub_var "CANDIDATE_DIAG_OBSERVED_WIND_VAR" "${CANDIDATE_DIAG_OBSERVED_WIND_VAR}"
+  append_qsub_var "CANDIDATE_DIAG_OBSERVED_BASIN_METHOD" "${CANDIDATE_DIAG_OBSERVED_BASIN_METHOD}"
+  append_qsub_var "CANDIDATE_DIAG_MONTHS" "${CANDIDATE_DIAG_MONTHS}"
+  append_qsub_var "CANDIDATE_DIAG_MIN_LAT" "${CANDIDATE_DIAG_MIN_LAT}"
+  append_qsub_var "CANDIDATE_DIAG_MAX_LAT" "${CANDIDATE_DIAG_MAX_LAT}"
+  append_qsub_var "CANDIDATE_DIAG_PLOT_DIR" "${CANDIDATE_DIAG_PLOT_DIR}"
+  append_qsub_var "CANDIDATE_DIAG_PREFIX" "${CANDIDATE_DIAG_PREFIX}"
+  append_qsub_var "CANDIDATE_DIAG_DPI" "${CANDIDATE_DIAG_DPI}"
+  append_qsub_var "CANDIDATE_DIAG_DENSITY_BIN_DEG" "${CANDIDATE_DIAG_DENSITY_BIN_DEG}"
+  append_qsub_var "RUN_COUNT_DIAGNOSTICS" "${RUN_COUNT_DIAGNOSTICS}"
+  append_qsub_var "COUNT_DIAG_CANDIDATES" "${COUNT_DIAG_CANDIDATES}"
+  append_qsub_var "COUNT_DIAG_IBTRACS" "${COUNT_DIAG_IBTRACS}"
+  append_qsub_var "COUNT_DIAG_START_YEAR" "${COUNT_DIAG_START_YEAR}"
+  append_qsub_var "COUNT_DIAG_END_YEAR" "${COUNT_DIAG_END_YEAR}"
+  append_qsub_var "COUNT_DIAG_MONTHS" "${COUNT_DIAG_MONTHS}"
+  append_qsub_var "COUNT_DIAG_WIND_VAR" "${COUNT_DIAG_WIND_VAR}"
+  append_qsub_var "COUNT_DIAG_THRESHOLD_KT" "${COUNT_DIAG_THRESHOLD_KT}"
+  append_qsub_var "COUNT_DIAG_NATURE_FILTER" "${COUNT_DIAG_NATURE_FILTER}"
+  append_qsub_var "COUNT_DIAG_OBSERVED_COUNT_METRIC" "${COUNT_DIAG_OBSERVED_COUNT_METRIC}"
+  append_qsub_var "COUNT_DIAG_THRESHOLD_SOURCE" "${COUNT_DIAG_THRESHOLD_SOURCE}"
+  append_qsub_var "COUNT_DIAG_MIN_LAT" "${COUNT_DIAG_MIN_LAT}"
+  append_qsub_var "COUNT_DIAG_MAX_LAT" "${COUNT_DIAG_MAX_LAT}"
+  append_qsub_var "COUNT_DIAG_EXPECTED_MEMBERS_PER_YEAR" "${COUNT_DIAG_EXPECTED_MEMBERS_PER_YEAR}"
+  append_qsub_var "COUNT_DIAG_OUTPUT_DIR" "${COUNT_DIAG_OUTPUT_DIR}"
+  append_qsub_var "COUNT_DIAG_PLOT_DIR" "${COUNT_DIAG_PLOT_DIR}"
+  append_qsub_var "COUNT_DIAG_PREFIX" "${COUNT_DIAG_PREFIX}"
   append_qsub_var "CONDA_ENV" "${CONDA_ENV}"
   append_qsub_var "CONDA_BASE" "${CONDA_BASE}"
   append_qsub_var "PYTHON_BIN" "${PYTHON_BIN}"
@@ -259,6 +319,133 @@ cleanup_resubmit_watchdog() {
 
 trap cleanup_resubmit_watchdog EXIT
 
+run_candidate_diagnostics() {
+  local diag_candidates
+  local diag_prefix
+  local diag_thresholds
+  local diag_status
+  local diag_cmd
+
+  if [[ "${RUN_CANDIDATE_DIAGNOSTICS}" != "1" ]]; then
+    return 0
+  fi
+
+  diag_candidates="${CANDIDATE_DIAG_CANDIDATES}"
+  if [[ -z "${diag_candidates}" ]]; then
+    if [[ -n "${OUTPUT_PREFIX}" ]]; then
+      diag_candidates="${OUTPUT_DIR}/${OUTPUT_PREFIX}_candidates.csv"
+    else
+      diag_candidates="${OUTPUT_DIR}/*_candidates.csv"
+    fi
+  fi
+
+  diag_thresholds="${CANDIDATE_DIAG_THRESHOLDS}"
+  if [[ -z "${diag_thresholds}" && -n "${OUTPUT_PREFIX}" ]]; then
+    diag_thresholds="${OUTPUT_DIR}/${OUTPUT_PREFIX}.csv"
+  fi
+
+  diag_prefix="${CANDIDATE_DIAG_PREFIX}"
+  if [[ -z "${diag_prefix}" ]]; then
+    if [[ -n "${OUTPUT_PREFIX}" ]]; then
+      diag_prefix="${OUTPUT_PREFIX}"
+    else
+      diag_prefix="geos_candidate_diagnostics"
+    fi
+  fi
+
+  diag_cmd=(
+    "${PYTHON_BIN}" -u scripts/plot_geos_candidate_diagnostics.py
+    --candidates "${diag_candidates}"
+    --observed-percentiles "${CANDIDATE_DIAG_OBSERVED_PERCENTILES}"
+    --observed-wind-var "${CANDIDATE_DIAG_OBSERVED_WIND_VAR}"
+    --observed-basin-method "${CANDIDATE_DIAG_OBSERVED_BASIN_METHOD}"
+    --months "${CANDIDATE_DIAG_MONTHS}"
+    --min-lat "${CANDIDATE_DIAG_MIN_LAT}"
+    --max-lat "${CANDIDATE_DIAG_MAX_LAT}"
+    --plot-dir "${CANDIDATE_DIAG_PLOT_DIR}"
+    --prefix "${diag_prefix}"
+    --dpi "${CANDIDATE_DIAG_DPI}"
+    --density-bin-deg "${CANDIDATE_DIAG_DENSITY_BIN_DEG}"
+  )
+
+  if [[ -n "${diag_thresholds}" ]]; then
+    diag_cmd+=(--thresholds "${diag_thresholds}")
+  fi
+
+  echo "Running candidate diagnostics: ${diag_cmd[*]}"
+  "${diag_cmd[@]}"
+  diag_status=$?
+  if (( diag_status != 0 )); then
+    echo "WARNING: candidate diagnostics failed with status ${diag_status}; threshold/resume workflow will continue."
+  fi
+  return 0
+}
+
+run_count_diagnostics() {
+  local diag_candidates
+  local diag_prefix
+  local diag_status
+  local diag_cmd
+
+  if [[ "${RUN_COUNT_DIAGNOSTICS}" != "1" ]]; then
+    return 0
+  fi
+
+  diag_candidates="${COUNT_DIAG_CANDIDATES}"
+  if [[ -z "${diag_candidates}" ]]; then
+    if [[ -n "${OUTPUT_PREFIX}" ]]; then
+      diag_candidates="${OUTPUT_DIR}/${OUTPUT_PREFIX}_candidates.csv"
+    else
+      diag_candidates="${OUTPUT_DIR}/*_candidates.csv"
+    fi
+  fi
+
+  diag_prefix="${COUNT_DIAG_PREFIX}"
+  if [[ -z "${diag_prefix}" ]]; then
+    if [[ -n "${OUTPUT_PREFIX}" ]]; then
+      diag_prefix="geos_ibtracs_count_comparison_${OUTPUT_PREFIX}"
+    else
+      diag_prefix="geos_ibtracs_count_comparison"
+    fi
+  fi
+
+  diag_cmd=(
+    "${PYTHON_BIN}" -u scripts/compare_geos_candidates_to_ibtracs_counts.py
+    --candidates "${diag_candidates}"
+    --ibtracs "${COUNT_DIAG_IBTRACS}"
+    --start-year "${COUNT_DIAG_START_YEAR}"
+    --end-year "${COUNT_DIAG_END_YEAR}"
+    --months "${COUNT_DIAG_MONTHS}"
+    --wind-var "${COUNT_DIAG_WIND_VAR}"
+    --threshold-kt "${COUNT_DIAG_THRESHOLD_KT}"
+    --observed-count-metric "${COUNT_DIAG_OBSERVED_COUNT_METRIC}"
+    --threshold-source "${COUNT_DIAG_THRESHOLD_SOURCE}"
+    --min-lat "${COUNT_DIAG_MIN_LAT}"
+    --max-lat "${COUNT_DIAG_MAX_LAT}"
+    --output-dir "${COUNT_DIAG_OUTPUT_DIR}"
+    --plot-dir "${COUNT_DIAG_PLOT_DIR}"
+    --prefix "${diag_prefix}"
+  )
+
+  if [[ -n "${COUNT_DIAG_NATURE_FILTER}" && "${COUNT_DIAG_NATURE_FILTER}" != "all" ]]; then
+    diag_cmd+=(--nature-filter "${COUNT_DIAG_NATURE_FILTER}")
+  else
+    diag_cmd+=(--all-natures)
+  fi
+
+  if [[ "${COUNT_DIAG_EXPECTED_MEMBERS_PER_YEAR}" != "0" ]]; then
+    diag_cmd+=(--expected-members-per-year "${COUNT_DIAG_EXPECTED_MEMBERS_PER_YEAR}")
+  fi
+
+  echo "Running count diagnostics: ${diag_cmd[*]}"
+  "${diag_cmd[@]}"
+  diag_status=$?
+  if (( diag_status != 0 )); then
+    echo "WARNING: count diagnostics failed with status ${diag_status}; threshold/resume workflow will continue."
+  fi
+  return 0
+}
+
 echo "Job started: $(date)"
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "SFC_ROOT=${SFC_ROOT}"
@@ -287,6 +474,36 @@ echo "RESUBMIT_AFTER_HOURS=${RESUBMIT_AFTER_HOURS}"
 echo "RESUBMIT_COUNT=${RESUBMIT_COUNT}"
 echo "MAX_RESUBMITS=${MAX_RESUBMITS}"
 echo "STOP_AFTER_HOURS=${STOP_AFTER_HOURS}"
+echo "RUN_CANDIDATE_DIAGNOSTICS=${RUN_CANDIDATE_DIAGNOSTICS}"
+echo "CANDIDATE_DIAG_CANDIDATES=${CANDIDATE_DIAG_CANDIDATES}"
+echo "CANDIDATE_DIAG_THRESHOLDS=${CANDIDATE_DIAG_THRESHOLDS}"
+echo "CANDIDATE_DIAG_OBSERVED_PERCENTILES=${CANDIDATE_DIAG_OBSERVED_PERCENTILES}"
+echo "CANDIDATE_DIAG_OBSERVED_WIND_VAR=${CANDIDATE_DIAG_OBSERVED_WIND_VAR}"
+echo "CANDIDATE_DIAG_OBSERVED_BASIN_METHOD=${CANDIDATE_DIAG_OBSERVED_BASIN_METHOD}"
+echo "CANDIDATE_DIAG_MONTHS=${CANDIDATE_DIAG_MONTHS}"
+echo "CANDIDATE_DIAG_MIN_LAT=${CANDIDATE_DIAG_MIN_LAT}"
+echo "CANDIDATE_DIAG_MAX_LAT=${CANDIDATE_DIAG_MAX_LAT}"
+echo "CANDIDATE_DIAG_PLOT_DIR=${CANDIDATE_DIAG_PLOT_DIR}"
+echo "CANDIDATE_DIAG_PREFIX=${CANDIDATE_DIAG_PREFIX}"
+echo "CANDIDATE_DIAG_DPI=${CANDIDATE_DIAG_DPI}"
+echo "CANDIDATE_DIAG_DENSITY_BIN_DEG=${CANDIDATE_DIAG_DENSITY_BIN_DEG}"
+echo "RUN_COUNT_DIAGNOSTICS=${RUN_COUNT_DIAGNOSTICS}"
+echo "COUNT_DIAG_CANDIDATES=${COUNT_DIAG_CANDIDATES}"
+echo "COUNT_DIAG_IBTRACS=${COUNT_DIAG_IBTRACS}"
+echo "COUNT_DIAG_START_YEAR=${COUNT_DIAG_START_YEAR}"
+echo "COUNT_DIAG_END_YEAR=${COUNT_DIAG_END_YEAR}"
+echo "COUNT_DIAG_MONTHS=${COUNT_DIAG_MONTHS}"
+echo "COUNT_DIAG_WIND_VAR=${COUNT_DIAG_WIND_VAR}"
+echo "COUNT_DIAG_THRESHOLD_KT=${COUNT_DIAG_THRESHOLD_KT}"
+echo "COUNT_DIAG_NATURE_FILTER=${COUNT_DIAG_NATURE_FILTER}"
+echo "COUNT_DIAG_OBSERVED_COUNT_METRIC=${COUNT_DIAG_OBSERVED_COUNT_METRIC}"
+echo "COUNT_DIAG_THRESHOLD_SOURCE=${COUNT_DIAG_THRESHOLD_SOURCE}"
+echo "COUNT_DIAG_MIN_LAT=${COUNT_DIAG_MIN_LAT}"
+echo "COUNT_DIAG_MAX_LAT=${COUNT_DIAG_MAX_LAT}"
+echo "COUNT_DIAG_EXPECTED_MEMBERS_PER_YEAR=${COUNT_DIAG_EXPECTED_MEMBERS_PER_YEAR}"
+echo "COUNT_DIAG_OUTPUT_DIR=${COUNT_DIAG_OUTPUT_DIR}"
+echo "COUNT_DIAG_PLOT_DIR=${COUNT_DIAG_PLOT_DIR}"
+echo "COUNT_DIAG_PREFIX=${COUNT_DIAG_PREFIX}"
 echo "CONDA_ENV=${CONDA_ENV}"
 echo "CONDA_BASE=${CONDA_BASE:-auto}"
 
@@ -380,6 +597,11 @@ fi
 echo "Running: ${cmd[*]}"
 "${cmd[@]}"
 status=$?
+
+if [[ "${status}" == "0" || "${status}" == "75" ]]; then
+  run_candidate_diagnostics
+  run_count_diagnostics
+fi
 
 if [[ "${AUTO_RESUBMIT_ACTIVE}" == "1" && "${status}" == "75" ]]; then
   echo "Python stopped cleanly after STOP_AFTER_HOURS=${STOP_AFTER_HOURS}; queueing resume job."
