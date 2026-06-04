@@ -62,12 +62,12 @@ BASINS = {
     },
     "South Indian": {
         "codes": ("SI",),
-        "lat_range": (-40.0, 0.0),
+        "lat_range": (-25.0, 0.0),
         "lon_range": (20.0, 135.0),
     },
     "South Pacific": {
         "codes": ("SP",),
-        "lat_range": (-40.0, 0.0),
+        "lat_range": (-25.0, 0.0),
         "lon_ranges": [(135.0, 180.0), (-180.0, -120.0)],
     },
 }

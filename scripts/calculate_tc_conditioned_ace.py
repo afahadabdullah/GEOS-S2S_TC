@@ -106,16 +106,16 @@ BASINS = {
         "label_xy": (70.0, 32.0)
     },
     "South Indian": {
-        "lat_range": (-40.0, 0.0),
+        "lat_range": (-25.0, 0.0),
         "lon_range": (20.0, 135.0),
         "color": "#00bbf9",
-        "label_xy": (80.0, -32.0)
+        "label_xy": (80.0, -15.0)
     },
     "South Pacific": {
-        "lat_range": (-40.0, 0.0),
+        "lat_range": (-25.0, 0.0),
         "lon_ranges": [(135.0, 180.0), (-180.0, -120.0)],
         "color": "#ff007f",
-        "label_xy": (-155.0, -32.0)
+        "label_xy": (-155.0, -15.0)
     },
 }
 
@@ -1228,6 +1228,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    args.plot_individual = False
     plot_dir = Path(args.plot_dir)
     threshold_csv = Path(args.geos_thresholds) if args.geos_thresholds else None
     basin_thresholds, threshold_mode, threshold_source = load_basin_thresholds(
