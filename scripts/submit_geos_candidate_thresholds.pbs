@@ -327,38 +327,72 @@ cleanup_resubmit_watchdog() {
 
 trap cleanup_resubmit_watchdog EXIT
 
+effective_output_prefix() {
+  local first_init=""
+  local last_init=""
+  local init_label=""
+  local ens_label
+  local item
+  local dates=()
+
+  if [[ -n "${OUTPUT_PREFIX}" ]]; then
+    printf "%s" "${OUTPUT_PREFIX}"
+    return 0
+  fi
+
+  if [[ -n "${INIT_DATES_FILE}" && -f "${INIT_DATES_FILE}" ]]; then
+    first_init="$(awk 'NF && $1 !~ /^#/ {print $1; exit}' "${INIT_DATES_FILE}")"
+    last_init="$(awk 'NF && $1 !~ /^#/ {value=$1} END {print value}' "${INIT_DATES_FILE}")"
+  fi
+
+  if [[ -z "${first_init}" || -z "${last_init}" ]]; then
+    for item in ${INIT_DATE//[,:]/ }; do
+      if [[ -n "${item}" ]]; then
+        dates+=("${item}")
+      fi
+    done
+    if (( ${#dates[@]} > 0 )); then
+      first_init="${dates[0]}"
+      last_init="${dates[$(( ${#dates[@]} - 1 ))]}"
+    fi
+  fi
+
+  if [[ -n "${first_init}" && -n "${last_init}" && "${first_init}" != "${last_init}" ]]; then
+    init_label="${first_init}_${last_init}"
+  else
+    init_label="${first_init:-${last_init:-${INIT_DATE}}}"
+  fi
+
+  ens_label="${ENS//,/-}"
+  printf "geos_candidate_thresholds_%s_%s" "${init_label}" "${ens_label}"
+}
+
 run_candidate_diagnostics() {
   local diag_candidates
   local diag_prefix
   local diag_thresholds
   local diag_status
   local diag_cmd
+  local effective_prefix
 
   if [[ "${RUN_CANDIDATE_DIAGNOSTICS}" != "1" ]]; then
     return 0
   fi
+  effective_prefix="$(effective_output_prefix)"
 
   diag_candidates="${CANDIDATE_DIAG_CANDIDATES}"
   if [[ -z "${diag_candidates}" ]]; then
-    if [[ -n "${OUTPUT_PREFIX}" ]]; then
-      diag_candidates="${OUTPUT_DIR}/${OUTPUT_PREFIX}_candidates.csv"
-    else
-      diag_candidates="${OUTPUT_DIR}/*_candidates.csv"
-    fi
+    diag_candidates="${OUTPUT_DIR}/${effective_prefix}_candidates.csv"
   fi
 
   diag_thresholds="${CANDIDATE_DIAG_THRESHOLDS}"
-  if [[ -z "${diag_thresholds}" && -n "${OUTPUT_PREFIX}" ]]; then
-    diag_thresholds="${OUTPUT_DIR}/${OUTPUT_PREFIX}.csv"
+  if [[ -z "${diag_thresholds}" ]]; then
+    diag_thresholds="${OUTPUT_DIR}/${effective_prefix}.csv"
   fi
 
   diag_prefix="${CANDIDATE_DIAG_PREFIX}"
   if [[ -z "${diag_prefix}" ]]; then
-    if [[ -n "${OUTPUT_PREFIX}" ]]; then
-      diag_prefix="${OUTPUT_PREFIX}"
-    else
-      diag_prefix="geos_candidate_diagnostics"
-    fi
+    diag_prefix="${effective_prefix}"
   fi
 
   diag_cmd=(
@@ -400,27 +434,21 @@ run_count_diagnostics() {
   local diag_prefix
   local diag_status
   local diag_cmd
+  local effective_prefix
 
   if [[ "${RUN_COUNT_DIAGNOSTICS}" != "1" ]]; then
     return 0
   fi
+  effective_prefix="$(effective_output_prefix)"
 
   diag_candidates="${COUNT_DIAG_CANDIDATES}"
   if [[ -z "${diag_candidates}" ]]; then
-    if [[ -n "${OUTPUT_PREFIX}" ]]; then
-      diag_candidates="${OUTPUT_DIR}/${OUTPUT_PREFIX}_candidates.csv"
-    else
-      diag_candidates="${OUTPUT_DIR}/*_candidates.csv"
-    fi
+    diag_candidates="${OUTPUT_DIR}/${effective_prefix}_candidates.csv"
   fi
 
   diag_prefix="${COUNT_DIAG_PREFIX}"
   if [[ -z "${diag_prefix}" ]]; then
-    if [[ -n "${OUTPUT_PREFIX}" ]]; then
-      diag_prefix="geos_ibtracs_count_comparison_${OUTPUT_PREFIX}"
-    else
-      diag_prefix="geos_ibtracs_count_comparison"
-    fi
+    diag_prefix="geos_ibtracs_count_comparison_${effective_prefix}"
   fi
 
   diag_cmd=(
