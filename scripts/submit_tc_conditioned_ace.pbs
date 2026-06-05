@@ -38,6 +38,8 @@ ENS="${ENS:-all}"
 FORECAST_MONTHS="${FORECAST_MONTHS:-09:10}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data/cache}"
 PLOT_DIR="${PLOT_DIR:-${REPO_ROOT}/plots/ace}"
+ACE_PROGRESS_INIT_DATES_FILE="${ACE_PROGRESS_INIT_DATES_FILE:-${REPO_ROOT}/config/init_dates_late_aug_1991_2024.txt}"
+ACE_PROGRESS_YEARS="${ACE_PROGRESS_YEARS:-1991:2024}"
 GEOS_THRESHOLDS="${GEOS_THRESHOLDS:-${REPO_ROOT}/data/calibration/count_comparison/geos_ibtracs_count_comparison_19910824_20240829_all_countmatch_count_calibration.csv}"
 THRESHOLD_COLUMN="${THRESHOLD_COLUMN:-count_match_threshold_kt}"
 THRESHOLD_WIND_VAR="${THRESHOLD_WIND_VAR:-usa_wind}"
@@ -178,6 +180,8 @@ submit_resume_job() {
   append_qsub_var "FORECAST_MONTHS" "${FORECAST_MONTHS}"
   append_qsub_var "CACHE_DIR" "${CACHE_DIR}"
   append_qsub_var "PLOT_DIR" "${PLOT_DIR}"
+  append_qsub_var "ACE_PROGRESS_INIT_DATES_FILE" "${ACE_PROGRESS_INIT_DATES_FILE}"
+  append_qsub_var "ACE_PROGRESS_YEARS" "${ACE_PROGRESS_YEARS}"
   append_qsub_var "GEOS_THRESHOLDS" "${GEOS_THRESHOLDS}"
   append_qsub_var "THRESHOLD_COLUMN" "${THRESHOLD_COLUMN}"
   append_qsub_var "THRESHOLD_WIND_VAR" "${THRESHOLD_WIND_VAR}"
@@ -249,6 +253,27 @@ cleanup_resubmit_watchdog() {
 
 trap cleanup_resubmit_watchdog EXIT
 
+print_ace_progress() {
+  local label="$1"
+  local progress_script="${REPO_ROOT}/scripts/summarize_ace_progress.py"
+
+  if [[ ! -f "${progress_script}" ]]; then
+    echo "ACE progress (${label}): progress script not found: ${progress_script}"
+    return 0
+  fi
+
+  echo ""
+  echo "ACE progress (${label}):"
+  "${PYTHON_BIN}" "${progress_script}" \
+    --cache-dir "${CACHE_DIR}" \
+    --sfc-root "${SFC_ROOT}" \
+    --init-dates-file "${ACE_PROGRESS_INIT_DATES_FILE}" \
+    --years "${ACE_PROGRESS_YEARS}" \
+    --ens "${ENS}" \
+    --compact || echo "WARNING: ACE progress summary failed"
+  echo ""
+}
+
 cd "${REPO_ROOT}"
 
 if [[ -z "${INIT_DATE}" ]]; then
@@ -265,6 +290,8 @@ echo "ATM_COLLECTION=${ATM_COLLECTION}"
 echo "INIT_DATE=${INIT_DATE}"
 echo "ENS=${ENS}"
 echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
+echo "ACE_PROGRESS_INIT_DATES_FILE=${ACE_PROGRESS_INIT_DATES_FILE}"
+echo "ACE_PROGRESS_YEARS=${ACE_PROGRESS_YEARS}"
 echo "GEOS_THRESHOLDS=${GEOS_THRESHOLDS}"
 echo "THRESHOLD_COLUMN=${THRESHOLD_COLUMN}"
 echo "CACHE_DIR=${CACHE_DIR}"
@@ -309,6 +336,7 @@ if (( dep_status != 0 )); then
 fi
 
 start_resubmit_watchdog
+print_ace_progress "before INIT_DATE=${INIT_DATE}"
 
 cmd=(
   "${PYTHON_BIN}" -u scripts/calculate_tc_conditioned_ace.py
@@ -344,5 +372,6 @@ echo "Job finished: $(date)"
 echo "Exit status: ${status}"
 echo "ACE cache files for INIT_DATE=${INIT_DATE}:"
 find "${CACHE_DIR}" -maxdepth 1 \( -name "tc_conditioned_ace_${INIT_DATE}_*.nc4" -o -name "tc_conditioned_ace_${INIT_DATE}_member_summary.csv" \) -print | sort
+print_ace_progress "after INIT_DATE=${INIT_DATE}"
 
 exit "${status}"

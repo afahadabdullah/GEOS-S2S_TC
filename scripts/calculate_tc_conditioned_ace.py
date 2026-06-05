@@ -902,6 +902,29 @@ def stop_after_hours_reached(args: argparse.Namespace) -> bool:
     return (time.monotonic() - start_monotonic) >= stop_after_hours * 3600.0
 
 
+def progress_bar(done: int, total: int, width: int = 28) -> str:
+    if total <= 0:
+        return "[" + "-" * width + "] unknown"
+    done = max(0, min(done, total))
+    filled = int(round(width * done / total))
+    pct = 100.0 * done / total
+    return f"[{'#' * filled}{'-' * (width - filled)}] {done}/{total} ({pct:5.1f}%)"
+
+
+def cache_matches_threshold(
+    cache_path: Path,
+    threshold_signature: str,
+    threshold_mode: str,
+    ts_threshold: float,
+) -> bool:
+    if not cache_path.is_file():
+        return False
+    cache_signature = cache_threshold_signature(cache_path)
+    if cache_signature == threshold_signature:
+        return True
+    return cache_signature is None and threshold_mode == "fixed" and ts_threshold == TS_THRESHOLD_KNOTS_DEFAULT
+
+
 def plot_ace_diagnostics(
     local_ace: np.ndarray,
     cumulative_ace_time: np.ndarray,
@@ -1436,7 +1459,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: No ensemble directories found in {sfc_fcst_dir}", file=sys.stderr)
             return 1
     else:
-        ens_list = [e.strip() for e in ens_input.split(",") if e.strip()]
+        ens_list = parse_list(ens_input)
 
     print("=" * 80)
     print("GEOS S2S3 UNIFIED TC-CONDITIONED ACE DIAGNOSTICS")
@@ -1444,6 +1467,19 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Target Ensembles: {', '.join(ens_list)}")
     print_thresholds(basin_thresholds, threshold_mode, threshold_source)
     print("=" * 80)
+    existing_matching_caches = sum(
+        cache_matches_threshold(
+            cache_dir / f"tc_conditioned_ace_{args.init_date}_{ens_member}.nc4",
+            threshold_signature,
+            threshold_mode,
+            args.ts_threshold,
+        )
+        for ens_member in ens_list
+    )
+    print(
+        f"ACE member cache progress for {args.init_date}: "
+        f"{progress_bar(existing_matching_caches, len(ens_list))} matching caches before this job"
+    )
 
     processed_count = 0
     stopped_early = False
@@ -1458,10 +1494,12 @@ def main(argv: list[str] | None = None) -> int:
         member_cache_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_{ens_member}.nc4"
         cache_matches = False
         if member_cache_path.is_file() and not args.force_recompute:
-            cache_signature = cache_threshold_signature(member_cache_path)
-            cache_matches = cache_signature == threshold_signature
-            if cache_signature is None and threshold_mode == "fixed" and args.ts_threshold == TS_THRESHOLD_KNOTS_DEFAULT:
-                cache_matches = True
+            cache_matches = cache_matches_threshold(
+                member_cache_path,
+                threshold_signature,
+                threshold_mode,
+                args.ts_threshold,
+            )
             if not cache_matches:
                 print(f"[Cache] Existing cache threshold signature differs for '{ens_member}'; recomputing {member_cache_path.name}")
             else:
@@ -1500,6 +1538,7 @@ def main(argv: list[str] | None = None) -> int:
                 all_member_results.append((ens_member, c_lats, c_lons, c_times, c_local_ace, np_diagnostics, c_vort, c_monthly))
                 processed_count += 1
                 print(f"[Cache] Completed member '{ens_member}' using cached diagnostics.")
+                print(f"ACE member progress {args.init_date}: {progress_bar(processed_count, len(ens_list))} latest={ens_member}")
                 if member_index < len(ens_list) - 1 and stop_after_hours_reached(args):
                     print(
                         f"Stop-after-hours reached after member '{ens_member}'. "
@@ -1857,6 +1896,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{basin_name:18s} total_ace={total_ace:8.2f}  tc_hits={hits}")
             print("=" * 80)
             processed_count += 1
+            print(f"ACE member progress {args.init_date}: {progress_bar(processed_count, len(ens_list))} latest={ens_member}")
             if member_index < len(ens_list) - 1 and stop_after_hours_reached(args):
                 print(
                     f"Stop-after-hours reached after member '{ens_member}'. "
