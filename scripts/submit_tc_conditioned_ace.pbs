@@ -1,0 +1,212 @@
+#!/bin/bash -l
+
+#######################################################################
+#                     Batch Parameters for Run Job
+#######################################################################
+
+#PBS -l walltime=8:00:00
+#PBS -l select=1:ncpus=1:mpiprocs=1:model=sky_ele
+#PBS -N geos_tc_ace
+#PBS -q normal
+#PBS -W group_list=s2406
+#PBS -j oe -k oed
+
+# Calculate TC-conditioned ACE for one initialization date. The Python driver
+# writes one NetCDF cache per init/member, one init-date ensmean cache, and a
+# compact member summary CSV for later plotting.
+
+set -u
+umask 022
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+
+if [[ -d "${SUBMIT_DIR}/scripts" ]]; then
+  REPO_ROOT="${SUBMIT_DIR}"
+elif [[ "$(basename "${SUBMIT_DIR}")" == "scripts" ]]; then
+  REPO_ROOT="${SUBMIT_DIR%/scripts}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  REPO_ROOT="${SCRIPT_DIR%/scripts}"
+fi
+
+SFC_ROOT="${SFC_ROOT:-/nobackupp27/afahad/project/GEOS-S2S_TC/data}"
+ATM_ROOT="${ATM_ROOT:-/nobackupp17/afahad/GEOSS2S3_atm}"
+SFC_COLLECTION="${SFC_COLLECTION:-sfc_tavg_3hr_glo_L720x361_sfc}"
+ATM_COLLECTION="${ATM_COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
+INIT_DATE="${INIT_DATE:-}"
+ENS="${ENS:-all}"
+FORECAST_MONTHS="${FORECAST_MONTHS:-09,10}"
+CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data/cache}"
+PLOT_DIR="${PLOT_DIR:-${REPO_ROOT}/plots/ace}"
+GEOS_THRESHOLDS="${GEOS_THRESHOLDS:-${REPO_ROOT}/data/calibration/count_comparison/geos_ibtracs_count_comparison_19910824_20240829_all_countmatch_count_calibration.csv}"
+THRESHOLD_COLUMN="${THRESHOLD_COLUMN:-count_match_threshold_kt}"
+THRESHOLD_WIND_VAR="${THRESHOLD_WIND_VAR:-usa_wind}"
+THRESHOLD_BASIN_METHOD="${THRESHOLD_BASIN_METHOD:-boxes}"
+SFC_MATCH_TOLERANCE_HOURS="${SFC_MATCH_TOLERANCE_HOURS:-3.1}"
+ENVIRONMENT_RADIUS_DEG="${ENVIRONMENT_RADIUS_DEG:-5.0}"
+INNER_CORE_RADIUS_DEG="${INNER_CORE_RADIUS_DEG:-1.5}"
+WIND_SEARCH_RADIUS_DEG="${WIND_SEARCH_RADIUS_DEG:-3.0}"
+FORCE_RECOMPUTE="${FORCE_RECOMPUTE:-0}"
+CONDA_ENV="${CONDA_ENV:-earth}"
+CONDA_BASE="${CONDA_BASE:-}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+
+resolve_conda_base() {
+  local candidate
+  local candidates=()
+
+  if [[ -n "${CONDA_BASE}" && -d "${CONDA_BASE}" ]]; then
+    return 0
+  fi
+
+  if command -v conda >/dev/null 2>&1; then
+    CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+    if [[ -n "${CONDA_BASE}" && -d "${CONDA_BASE}" ]]; then
+      return 0
+    fi
+  fi
+
+  candidates=(
+    "${HOME:-}/miniconda3"
+    "${HOME:-}/miniforge3"
+    "${HOME:-}/anaconda3"
+    "/nobackupnfs1/afahad/miniconda3"
+    "/nobackupnfs1/afahad/miniforge3"
+    "/nobackupp27/afahad/miniconda3"
+    "/nobackupp27/afahad/miniforge3"
+    "/nobackupp27/afahad/anaconda3"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "${candidate}" && -d "${candidate}" ]]; then
+      CONDA_BASE="${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+activate_conda_env() {
+  local activate_status
+
+  if [[ -z "${CONDA_ENV}" || "${CONDA_ENV}" == "none" ]]; then
+    echo "Skipping conda activation because CONDA_ENV=${CONDA_ENV}"
+    return 0
+  fi
+
+  if ! resolve_conda_base; then
+    echo "ERROR could not find conda base."
+    echo "Pass it explicitly, for example:"
+    echo "  qsub -v INIT_DATE=19910824,CONDA_BASE=/path/to/miniconda3,CONDA_ENV=${CONDA_ENV} scripts/submit_tc_conditioned_ace.pbs"
+    return 1
+  fi
+
+  if [[ -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
+    set +u
+    # shellcheck disable=SC1091
+    source "${CONDA_BASE}/etc/profile.d/conda.sh"
+    conda activate "${CONDA_ENV}"
+    activate_status=$?
+    set -u
+    return "${activate_status}"
+  elif [[ -f "${CONDA_BASE}/bin/activate" ]]; then
+    set +u
+    # shellcheck disable=SC1091
+    source "${CONDA_BASE}/bin/activate" "${CONDA_ENV}"
+    activate_status=$?
+    set -u
+    return "${activate_status}"
+  else
+    echo "ERROR conda activation scripts not found under CONDA_BASE=${CONDA_BASE}"
+    return 1
+  fi
+}
+
+cd "${REPO_ROOT}"
+
+if [[ -z "${INIT_DATE}" ]]; then
+  echo "ERROR INIT_DATE is required, e.g. qsub -v INIT_DATE=19910824 scripts/submit_tc_conditioned_ace.pbs"
+  exit 2
+fi
+
+echo "Job started: $(date)"
+echo "REPO_ROOT=${REPO_ROOT}"
+echo "SFC_ROOT=${SFC_ROOT}"
+echo "ATM_ROOT=${ATM_ROOT}"
+echo "SFC_COLLECTION=${SFC_COLLECTION}"
+echo "ATM_COLLECTION=${ATM_COLLECTION}"
+echo "INIT_DATE=${INIT_DATE}"
+echo "ENS=${ENS}"
+echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
+echo "GEOS_THRESHOLDS=${GEOS_THRESHOLDS}"
+echo "THRESHOLD_COLUMN=${THRESHOLD_COLUMN}"
+echo "CACHE_DIR=${CACHE_DIR}"
+echo "PLOT_DIR=${PLOT_DIR}"
+echo "CONDA_ENV=${CONDA_ENV}"
+echo "CONDA_BASE=${CONDA_BASE:-auto}"
+echo "PYTHON_BIN=${PYTHON_BIN:-auto}"
+
+if ! activate_conda_env; then
+  exit 5
+fi
+
+if [[ -z "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="$(command -v python || true)"
+fi
+if [[ -z "${PYTHON_BIN}" ]]; then
+  echo "ERROR python executable was not found after activating CONDA_ENV=${CONDA_ENV}"
+  exit 6
+fi
+
+echo "ACTIVE_CONDA_PREFIX=${CONDA_PREFIX:-}"
+echo "PYTHON_BIN=${PYTHON_BIN}"
+
+"${PYTHON_BIN}" - <<'PY'
+import importlib.util
+missing = [name for name in ("netCDF4", "numpy", "matplotlib") if importlib.util.find_spec(name) is None]
+if missing:
+    raise SystemExit(f"missing Python package(s): {', '.join(missing)}")
+print("Python dependency check passed: netCDF4, numpy, and matplotlib are available")
+PY
+dep_status=$?
+if (( dep_status != 0 )); then
+  echo "ERROR Python dependency check failed in CONDA_ENV=${CONDA_ENV}"
+  exit 8
+fi
+
+cmd=(
+  "${PYTHON_BIN}" -u scripts/calculate_tc_conditioned_ace.py
+  --sfc-root "${SFC_ROOT}"
+  --atm-root "${ATM_ROOT}"
+  --sfc-collection "${SFC_COLLECTION}"
+  --atm-collection "${ATM_COLLECTION}"
+  --init-date "${INIT_DATE}"
+  --ens "${ENS}"
+  --months "${FORECAST_MONTHS}"
+  --cache-dir "${CACHE_DIR}"
+  --plot-dir "${PLOT_DIR}"
+  --geos-thresholds "${GEOS_THRESHOLDS}"
+  --threshold-column "${THRESHOLD_COLUMN}"
+  --threshold-wind-var "${THRESHOLD_WIND_VAR}"
+  --threshold-basin-method "${THRESHOLD_BASIN_METHOD}"
+  --sfc-match-tolerance-hours "${SFC_MATCH_TOLERANCE_HOURS}"
+  --environment-radius-deg "${ENVIRONMENT_RADIUS_DEG}"
+  --inner-core-radius-deg "${INNER_CORE_RADIUS_DEG}"
+  --wind-search-radius-deg "${WIND_SEARCH_RADIUS_DEG}"
+)
+
+if [[ "${FORCE_RECOMPUTE}" == "1" ]]; then
+  cmd+=(--force-recompute)
+fi
+
+echo "Running: ${cmd[*]}"
+"${cmd[@]}"
+status=$?
+
+echo "Job finished: $(date)"
+echo "Exit status: ${status}"
+echo "ACE cache files for INIT_DATE=${INIT_DATE}:"
+find "${CACHE_DIR}" -maxdepth 1 \( -name "tc_conditioned_ace_${INIT_DATE}_*.nc4" -o -name "tc_conditioned_ace_${INIT_DATE}_member_summary.csv" \) -print | sort
+
+exit "${status}"
