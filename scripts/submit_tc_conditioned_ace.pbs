@@ -11,9 +11,9 @@
 #PBS -W group_list=s2406
 #PBS -j oe -k oed
 
-# Calculate TC-conditioned ACE for one initialization date. The Python driver
-# writes one NetCDF cache per init/member, one init-date ensmean cache, and a
-# compact member summary CSV for later plotting.
+# Calculate TC-conditioned ACE for one or more initialization dates. The Python
+# driver writes one NetCDF cache per init/member, one init-date ensmean cache,
+# and a compact member summary CSV for later plotting.
 
 set -u
 umask 022
@@ -34,6 +34,7 @@ ATM_ROOT="${ATM_ROOT:-/nobackupp17/afahad/GEOSS2S3_atm}"
 SFC_COLLECTION="${SFC_COLLECTION:-sfc_tavg_3hr_glo_L720x361_sfc}"
 ATM_COLLECTION="${ATM_COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
 INIT_DATE="${INIT_DATE:-}"
+INIT_DATES_FILE="${INIT_DATES_FILE:-}"
 ENS="${ENS:-all}"
 FORECAST_MONTHS="${FORECAST_MONTHS:-09:10}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data/cache}"
@@ -146,6 +147,78 @@ hours_to_seconds() {
   }'
 }
 
+seconds_to_hours() {
+  awk -v seconds="$1" 'BEGIN {
+    if (seconds < 0) {
+      seconds = 0
+    }
+    printf "%.6f", seconds / 3600.0
+  }'
+}
+
+read_selected_init_dates() {
+  local item
+  local value
+
+  INIT_DATES=()
+  if [[ -n "${INIT_DATES_FILE}" ]]; then
+    if [[ ! -f "${INIT_DATES_FILE}" ]]; then
+      echo "ERROR INIT_DATES_FILE does not exist: ${INIT_DATES_FILE}" >&2
+      return 1
+    fi
+    while read -r value _; do
+      if [[ -n "${value}" && "${value}" != \#* && "${value}" =~ ^[0-9]{8}$ ]]; then
+        INIT_DATES+=("${value}")
+      fi
+    done < "${INIT_DATES_FILE}"
+  else
+    for item in ${INIT_DATE//[,:]/ }; do
+      if [[ -n "${item}" ]]; then
+        INIT_DATES+=("${item}")
+      fi
+    done
+  fi
+
+  if (( ${#INIT_DATES[@]} == 0 )); then
+    echo "ERROR no initialization dates selected. Pass INIT_DATE=YYYYMMDD or INIT_DATES_FILE=/path/to/file." >&2
+    return 1
+  fi
+  return 0
+}
+
+elapsed_seconds() {
+  local now
+  now="$(date +%s)"
+  echo $((now - JOB_START_EPOCH))
+}
+
+remaining_stop_hours() {
+  local stop_seconds
+  local elapsed
+  local remaining
+
+  if [[ "${STOP_AFTER_HOURS}" == "0" || "${STOP_AFTER_HOURS}" == "0.0" ]]; then
+    echo "0"
+    return 0
+  fi
+  stop_seconds="$(hours_to_seconds "${STOP_AFTER_HOURS}")"
+  elapsed="$(elapsed_seconds)"
+  remaining=$((stop_seconds - elapsed))
+  seconds_to_hours "${remaining}"
+}
+
+stop_time_reached() {
+  local stop_seconds
+  local elapsed
+
+  if [[ "${STOP_AFTER_HOURS}" == "0" || "${STOP_AFTER_HOURS}" == "0.0" ]]; then
+    return 1
+  fi
+  stop_seconds="$(hours_to_seconds "${STOP_AFTER_HOURS}")"
+  elapsed="$(elapsed_seconds)"
+  [[ "${elapsed}" -ge "${stop_seconds}" ]]
+}
+
 append_qsub_var() {
   local name="$1"
   local value="$2"
@@ -176,6 +249,7 @@ submit_resume_job() {
   append_qsub_var "SFC_COLLECTION" "${SFC_COLLECTION}"
   append_qsub_var "ATM_COLLECTION" "${ATM_COLLECTION}"
   append_qsub_var "INIT_DATE" "${INIT_DATE}"
+  append_qsub_var "INIT_DATES_FILE" "${INIT_DATES_FILE}"
   append_qsub_var "ENS" "${ENS}"
   append_qsub_var "FORECAST_MONTHS" "${FORECAST_MONTHS}"
   append_qsub_var "CACHE_DIR" "${CACHE_DIR}"
@@ -275,9 +349,9 @@ print_ace_progress() {
 }
 
 cd "${REPO_ROOT}"
+JOB_START_EPOCH="$(date +%s)"
 
-if [[ -z "${INIT_DATE}" ]]; then
-  echo "ERROR INIT_DATE is required, e.g. qsub -v INIT_DATE=19910824 scripts/submit_tc_conditioned_ace.pbs"
+if ! read_selected_init_dates; then
   exit 2
 fi
 
@@ -288,6 +362,8 @@ echo "ATM_ROOT=${ATM_ROOT}"
 echo "SFC_COLLECTION=${SFC_COLLECTION}"
 echo "ATM_COLLECTION=${ATM_COLLECTION}"
 echo "INIT_DATE=${INIT_DATE}"
+echo "INIT_DATES_FILE=${INIT_DATES_FILE}"
+echo "SELECTED_INIT_DATES=${#INIT_DATES[@]} (${INIT_DATES[0]} to ${INIT_DATES[$(( ${#INIT_DATES[@]} - 1 ))]})"
 echo "ENS=${ENS}"
 echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
 echo "ACE_PROGRESS_INIT_DATES_FILE=${ACE_PROGRESS_INIT_DATES_FILE}"
@@ -336,42 +412,74 @@ if (( dep_status != 0 )); then
 fi
 
 start_resubmit_watchdog
-print_ace_progress "before INIT_DATE=${INIT_DATE}"
+print_ace_progress "before batch"
 
-cmd=(
-  "${PYTHON_BIN}" -u scripts/calculate_tc_conditioned_ace.py
-  --sfc-root "${SFC_ROOT}"
-  --atm-root "${ATM_ROOT}"
-  --sfc-collection "${SFC_COLLECTION}"
-  --atm-collection "${ATM_COLLECTION}"
-  --init-date "${INIT_DATE}"
-  --ens "${ENS}"
-  --months "${FORECAST_MONTHS}"
-  --cache-dir "${CACHE_DIR}"
-  --plot-dir "${PLOT_DIR}"
-  --geos-thresholds "${GEOS_THRESHOLDS}"
-  --threshold-column "${THRESHOLD_COLUMN}"
-  --threshold-wind-var "${THRESHOLD_WIND_VAR}"
-  --threshold-basin-method "${THRESHOLD_BASIN_METHOD}"
-  --sfc-match-tolerance-hours "${SFC_MATCH_TOLERANCE_HOURS}"
-  --environment-radius-deg "${ENVIRONMENT_RADIUS_DEG}"
-  --inner-core-radius-deg "${INNER_CORE_RADIUS_DEG}"
-  --wind-search-radius-deg "${WIND_SEARCH_RADIUS_DEG}"
-  --stop-after-hours "${STOP_AFTER_HOURS}"
-)
+status=0
+attempted_init_count=0
+for current_init in "${INIT_DATES[@]}"; do
+  if stop_time_reached; then
+    echo "STOP_AFTER_HOURS=${STOP_AFTER_HOURS} reached before starting INIT_DATE=${current_init}; exiting cleanly for resume."
+    break
+  fi
 
-if [[ "${FORCE_RECOMPUTE}" == "1" ]]; then
-  cmd+=(--force-recompute)
-fi
+  current_stop_hours="$(remaining_stop_hours)"
+  echo ""
+  echo "================================================================================"
+  echo "ACE batch progress: init $((attempted_init_count + 1))/${#INIT_DATES[@]} current=${current_init} remaining_stop_hours=${current_stop_hours}"
+  echo "================================================================================"
 
-echo "Running: ${cmd[*]}"
-"${cmd[@]}"
-status=$?
+  cmd=(
+    "${PYTHON_BIN}" -u scripts/calculate_tc_conditioned_ace.py
+    --sfc-root "${SFC_ROOT}"
+    --atm-root "${ATM_ROOT}"
+    --sfc-collection "${SFC_COLLECTION}"
+    --atm-collection "${ATM_COLLECTION}"
+    --init-date "${current_init}"
+    --ens "${ENS}"
+    --months "${FORECAST_MONTHS}"
+    --cache-dir "${CACHE_DIR}"
+    --plot-dir "${PLOT_DIR}"
+    --geos-thresholds "${GEOS_THRESHOLDS}"
+    --threshold-column "${THRESHOLD_COLUMN}"
+    --threshold-wind-var "${THRESHOLD_WIND_VAR}"
+    --threshold-basin-method "${THRESHOLD_BASIN_METHOD}"
+    --sfc-match-tolerance-hours "${SFC_MATCH_TOLERANCE_HOURS}"
+    --environment-radius-deg "${ENVIRONMENT_RADIUS_DEG}"
+    --inner-core-radius-deg "${INNER_CORE_RADIUS_DEG}"
+    --wind-search-radius-deg "${WIND_SEARCH_RADIUS_DEG}"
+    --stop-after-hours "${current_stop_hours}"
+  )
+
+  if [[ "${FORCE_RECOMPUTE}" == "1" ]]; then
+    cmd+=(--force-recompute)
+  fi
+
+  echo "Running: ${cmd[*]}"
+  "${cmd[@]}"
+  status=$?
+
+  echo "Finished INIT_DATE=${current_init}: $(date)"
+  echo "Exit status for INIT_DATE=${current_init}: ${status}"
+  echo "ACE cache files for INIT_DATE=${current_init}:"
+  find "${CACHE_DIR}" -maxdepth 1 \( -name "tc_conditioned_ace_${current_init}_*.nc4" -o -name "tc_conditioned_ace_${current_init}_member_summary.csv" \) -print | sort
+
+  if (( status != 0 )); then
+    echo "ERROR: stopping ACE batch because INIT_DATE=${current_init} failed with status ${status}."
+    break
+  fi
+
+  attempted_init_count=$((attempted_init_count + 1))
+  print_ace_progress "after INIT_DATE=${current_init}"
+
+  if stop_time_reached; then
+    echo "STOP_AFTER_HOURS=${STOP_AFTER_HOURS} reached after INIT_DATE=${current_init}; exiting cleanly for resume."
+    break
+  fi
+done
 
 echo "Job finished: $(date)"
-echo "Exit status: ${status}"
-echo "ACE cache files for INIT_DATE=${INIT_DATE}:"
-find "${CACHE_DIR}" -maxdepth 1 \( -name "tc_conditioned_ace_${INIT_DATE}_*.nc4" -o -name "tc_conditioned_ace_${INIT_DATE}_member_summary.csv" \) -print | sort
-print_ace_progress "after INIT_DATE=${INIT_DATE}"
+echo "Batch init dates attempted in this job: ${attempted_init_count}/${#INIT_DATES[@]}"
+echo "Final exit status: ${status}"
+print_ace_progress "after batch"
 
 exit "${status}"
