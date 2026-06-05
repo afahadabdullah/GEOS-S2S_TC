@@ -784,6 +784,115 @@ def thresholds_from_diagnostics(diagnostics: dict[str, dict[str, np.ndarray]]) -
     return thresholds
 
 
+def finite_last(values: np.ndarray | list[float]) -> float:
+    array = np.asarray(values, dtype="float64")
+    array = array[np.isfinite(array)]
+    return float(array[-1]) if array.size else float("nan")
+
+
+def finite_mean(values: np.ndarray | list[float]) -> float:
+    array = np.asarray(values, dtype="float64")
+    array = array[np.isfinite(array)]
+    return float(np.nanmean(array)) if array.size else float("nan")
+
+
+def finite_max(values: np.ndarray | list[float]) -> float:
+    array = np.asarray(values, dtype="float64")
+    array = array[np.isfinite(array)]
+    return float(np.nanmax(array)) if array.size else float("nan")
+
+
+def write_member_summary_csv(
+    output_path: Path,
+    init_date: str,
+    member_results: list[tuple],
+    basin_thresholds: dict[str, float],
+    threshold_mode: str,
+    threshold_source: str,
+) -> None:
+    """Write compact member-level ACE totals for quick spread/diagnostic plots."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "init_date",
+        "ens",
+        "basin_name",
+        "total_ace",
+        "tc_hits",
+        "time_steps",
+        "valid_time_start",
+        "valid_time_end",
+        "threshold_kt",
+        "max_vmax_kt",
+        "mean_vmax_kt",
+        "threshold_mode",
+        "threshold_source",
+        "cache_file",
+    ]
+    rows: list[dict[str, object]] = []
+    for result in member_results:
+        ens_member, _, _, member_times, _, diagnostics = result[:6]
+        valid_time_start = member_times[0].strftime("%Y-%m-%d %H:%M:%S") if member_times else ""
+        valid_time_end = member_times[-1].strftime("%Y-%m-%d %H:%M:%S") if member_times else ""
+        cache_file = f"tc_conditioned_ace_{init_date}_{ens_member}.nc4"
+        basin_totals: list[float] = []
+        basin_hits: list[float] = []
+        basin_vmax_values: list[np.ndarray] = []
+        for basin_name in BASINS:
+            basin_diag = diagnostics.get(basin_name, {})
+            total_ace = finite_last(basin_diag.get("cumulative_ace", []))
+            tc_hits = float(np.nansum(np.asarray(basin_diag.get("tc_flag", []), dtype="float64")))
+            vmax_values = np.asarray(basin_diag.get("vmax_kt", []), dtype="float64")
+            rows.append(
+                {
+                    "init_date": init_date,
+                    "ens": ens_member,
+                    "basin_name": basin_name,
+                    "total_ace": total_ace,
+                    "tc_hits": tc_hits,
+                    "time_steps": len(member_times),
+                    "valid_time_start": valid_time_start,
+                    "valid_time_end": valid_time_end,
+                    "threshold_kt": basin_thresholds.get(basin_name, finite_last(basin_diag.get("ts_threshold_kt", []))),
+                    "max_vmax_kt": finite_max(vmax_values),
+                    "mean_vmax_kt": finite_mean(vmax_values),
+                    "threshold_mode": threshold_mode,
+                    "threshold_source": threshold_source,
+                    "cache_file": cache_file,
+                }
+            )
+            if np.isfinite(total_ace):
+                basin_totals.append(total_ace)
+            if np.isfinite(tc_hits):
+                basin_hits.append(tc_hits)
+            basin_vmax_values.append(vmax_values[np.isfinite(vmax_values)])
+
+        all_vmax = np.concatenate([values for values in basin_vmax_values if values.size]) if any(values.size for values in basin_vmax_values) else np.array([])
+        rows.append(
+            {
+                "init_date": init_date,
+                "ens": ens_member,
+                "basin_name": "All Basins",
+                "total_ace": float(np.nansum(basin_totals)) if basin_totals else float("nan"),
+                "tc_hits": float(np.nansum(basin_hits)) if basin_hits else float("nan"),
+                "time_steps": len(member_times),
+                "valid_time_start": valid_time_start,
+                "valid_time_end": valid_time_end,
+                "threshold_kt": float("nan"),
+                "max_vmax_kt": finite_max(all_vmax),
+                "mean_vmax_kt": finite_mean(all_vmax),
+                "threshold_mode": threshold_mode,
+                "threshold_source": threshold_source,
+                "cache_file": cache_file,
+            }
+        )
+
+    with output_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Wrote member ACE summary: {output_path}")
+
+
 def plot_ace_diagnostics(
     local_ace: np.ndarray,
     cumulative_ace_time: np.ndarray,
@@ -1776,6 +1885,16 @@ def main(argv: list[str] | None = None) -> int:
                 mean_diagnostics[basin_name][field_name] = np.zeros(len(ref_times))
 
     any_uses_vorticity = any(res[6] for res in all_member_results)
+
+    member_summary_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_member_summary.csv"
+    write_member_summary_csv(
+        output_path=member_summary_path,
+        init_date=args.init_date,
+        member_results=all_member_results,
+        basin_thresholds=basin_thresholds,
+        threshold_mode=threshold_mode,
+        threshold_source=threshold_source,
+    )
     
     ensmean_cache_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_ensmean.nc4"
     write_cache(

@@ -675,7 +675,7 @@ def build_monthly_rows(
             obs_comparison_storm_year_counts: list[float] = []
             geos_struct_year_means: list[float] = []
             geos_ts_year_means: list[float] = []
-            comparison_years: list[int] = []
+            used_years: list[int] = []
             for year in years:
                 obs_fixes = [
                     fix
@@ -700,7 +700,7 @@ def build_monthly_rows(
                 geos_struct_mean = safe_member_mean(len(geos_basin), year, members_by_year, args.expected_members_per_year)
                 geos_ts_mean = safe_member_mean(geos_ts_count, year, members_by_year, args.expected_members_per_year)
                 if np.isfinite(geos_struct_mean):
-                    comparison_years.append(year)
+                    used_years.append(year)
                     obs_comparison_year_counts.append(obs_count)
                     obs_comparison_fix_year_counts.append(obs_fix_count)
                     obs_comparison_active_time_year_counts.append(obs_active_time_count)
@@ -714,8 +714,8 @@ def build_monthly_rows(
                     "basin_name": basin_name,
                     "nature_filter": args.nature_filter or "ALL",
                     "ibtracs_count_metric": args.observed_count_metric,
-                    "comparison_year_count": len(comparison_years),
-                    "comparison_years": ",".join(str(year) for year in comparison_years),
+                    "comparison_year_count": len(used_years),
+                    "comparison_years": ",".join(str(year) for year in used_years),
                     "ibtracs_count_year_mean": float(np.nanmean(obs_comparison_year_counts)) if obs_comparison_year_counts else float("nan"),
                     "ibtracs_fix_year_mean": float(np.nanmean(obs_comparison_fix_year_counts)) if obs_comparison_fix_year_counts else float("nan"),
                     "ibtracs_active_time_year_mean": float(np.nanmean(obs_comparison_active_time_year_counts))
@@ -828,7 +828,7 @@ def count_matched_geos_thresholds(
     rows: list[dict[str, object]] = []
 
     for basin_name in BASIN_ORDER:
-        comparison_years: list[int] = []
+        used_years: list[int] = []
         obs_counts: list[float] = []
         values: list[float] = []
         raw_weights: list[float] = []
@@ -837,7 +837,7 @@ def count_matched_geos_thresholds(
             denominator = member_denominator(year, members_by_year, args.expected_members_per_year)
             if denominator <= 0:
                 continue
-            comparison_years.append(year)
+            used_years.append(year)
             obs_fixes = [fix for fix in ibtracs_fixes if fix.year == year and fix.basin_name == basin_name]
             obs_counts.append(float(ibtracs_count_for_metric(obs_fixes, args.observed_count_metric)))
             for candidate in geos_candidates:
@@ -845,7 +845,7 @@ def count_matched_geos_thresholds(
                     values.append(candidate.vmax_kt)
                     raw_weights.append(1.0 / float(denominator))
 
-        year_count = len(comparison_years)
+        year_count = len(used_years)
         if year_count > 0 and raw_weights:
             weights = [weight / float(year_count) for weight in raw_weights]
             structural_mean = float(np.sum(weights))
@@ -865,7 +865,7 @@ def count_matched_geos_thresholds(
                 "nature_filter": args.nature_filter or "ALL",
                 "ibtracs_count_metric": args.observed_count_metric,
                 "comparison_year_count": year_count,
-                "comparison_years": ",".join(str(year) for year in comparison_years),
+                "comparison_years": ",".join(str(year) for year in used_years),
                 "ibtracs_count_year_mean": obs_mean,
                 "geos_structural_member_year_mean": structural_mean,
                 "geos_structural_to_ibtracs_count_ratio": structural_mean / obs_mean if np.isfinite(obs_mean) and obs_mean > 0 else float("nan"),
