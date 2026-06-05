@@ -35,7 +35,7 @@ SFC_COLLECTION="${SFC_COLLECTION:-sfc_tavg_3hr_glo_L720x361_sfc}"
 ATM_COLLECTION="${ATM_COLLECTION:-atm_inst_6hr_glo_L720x361_p49}"
 INIT_DATE="${INIT_DATE:-}"
 ENS="${ENS:-all}"
-FORECAST_MONTHS="${FORECAST_MONTHS:-09,10}"
+FORECAST_MONTHS="${FORECAST_MONTHS:-09:10}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data/cache}"
 PLOT_DIR="${PLOT_DIR:-${REPO_ROOT}/plots/ace}"
 GEOS_THRESHOLDS="${GEOS_THRESHOLDS:-${REPO_ROOT}/data/calibration/count_comparison/geos_ibtracs_count_comparison_19910824_20240829_all_countmatch_count_calibration.csv}"
@@ -50,6 +50,18 @@ FORCE_RECOMPUTE="${FORCE_RECOMPUTE:-0}"
 CONDA_ENV="${CONDA_ENV:-earth}"
 CONDA_BASE="${CONDA_BASE:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
+AUTO_RESUBMIT="${AUTO_RESUBMIT:-1}"
+RESUBMIT_AFTER_HOURS="${RESUBMIT_AFTER_HOURS:-7.5}"
+RESUBMIT_COUNT="${RESUBMIT_COUNT:-0}"
+MAX_RESUBMITS="${MAX_RESUBMITS:-20}"
+AUTO_RESUBMIT_ACTIVE="${AUTO_RESUBMIT}"
+if [[ "${AUTO_RESUBMIT}" == "1" && "${MAX_RESUBMITS}" != "0" && "${RESUBMIT_COUNT}" -ge "${MAX_RESUBMITS}" ]]; then
+  AUTO_RESUBMIT_ACTIVE="0"
+fi
+STOP_AFTER_HOURS="${STOP_AFTER_HOURS:-0}"
+if [[ "${AUTO_RESUBMIT_ACTIVE}" == "1" && ( "${STOP_AFTER_HOURS}" == "0" || "${STOP_AFTER_HOURS}" == "0.0" ) ]]; then
+  STOP_AFTER_HOURS="${RESUBMIT_AFTER_HOURS}"
+fi
 
 resolve_conda_base() {
   local candidate
@@ -123,6 +135,120 @@ activate_conda_env() {
   fi
 }
 
+hours_to_seconds() {
+  awk -v hours="$1" 'BEGIN {
+    if (hours < 0) {
+      hours = 0
+    }
+    printf "%d", hours * 3600
+  }'
+}
+
+append_qsub_var() {
+  local name="$1"
+  local value="$2"
+  if [[ -z "${value}" ]]; then
+    return 0
+  fi
+  RESUBMIT_VARS+=("${name}=${value}")
+}
+
+submit_resume_job() {
+  local next_count
+  local qsub_status
+  local varlist
+
+  if [[ -z "${PBS_JOBID:-}" ]]; then
+    echo "WARNING: PBS_JOBID is not set; cannot queue dependent resume job."
+    return 1
+  fi
+  if [[ -n "${RESUBMIT_QUEUED_FLAG:-}" && -f "${RESUBMIT_QUEUED_FLAG}" ]]; then
+    echo "Resume job has already been queued by this job."
+    return 0
+  fi
+
+  next_count=$((RESUBMIT_COUNT + 1))
+  RESUBMIT_VARS=()
+  append_qsub_var "SFC_ROOT" "${SFC_ROOT}"
+  append_qsub_var "ATM_ROOT" "${ATM_ROOT}"
+  append_qsub_var "SFC_COLLECTION" "${SFC_COLLECTION}"
+  append_qsub_var "ATM_COLLECTION" "${ATM_COLLECTION}"
+  append_qsub_var "INIT_DATE" "${INIT_DATE}"
+  append_qsub_var "ENS" "${ENS}"
+  append_qsub_var "FORECAST_MONTHS" "${FORECAST_MONTHS}"
+  append_qsub_var "CACHE_DIR" "${CACHE_DIR}"
+  append_qsub_var "PLOT_DIR" "${PLOT_DIR}"
+  append_qsub_var "GEOS_THRESHOLDS" "${GEOS_THRESHOLDS}"
+  append_qsub_var "THRESHOLD_COLUMN" "${THRESHOLD_COLUMN}"
+  append_qsub_var "THRESHOLD_WIND_VAR" "${THRESHOLD_WIND_VAR}"
+  append_qsub_var "THRESHOLD_BASIN_METHOD" "${THRESHOLD_BASIN_METHOD}"
+  append_qsub_var "SFC_MATCH_TOLERANCE_HOURS" "${SFC_MATCH_TOLERANCE_HOURS}"
+  append_qsub_var "ENVIRONMENT_RADIUS_DEG" "${ENVIRONMENT_RADIUS_DEG}"
+  append_qsub_var "INNER_CORE_RADIUS_DEG" "${INNER_CORE_RADIUS_DEG}"
+  append_qsub_var "WIND_SEARCH_RADIUS_DEG" "${WIND_SEARCH_RADIUS_DEG}"
+  append_qsub_var "FORCE_RECOMPUTE" "0"
+  append_qsub_var "CONDA_ENV" "${CONDA_ENV}"
+  append_qsub_var "CONDA_BASE" "${CONDA_BASE}"
+  append_qsub_var "PYTHON_BIN" "${PYTHON_BIN}"
+  append_qsub_var "AUTO_RESUBMIT" "${AUTO_RESUBMIT}"
+  append_qsub_var "RESUBMIT_AFTER_HOURS" "${RESUBMIT_AFTER_HOURS}"
+  append_qsub_var "STOP_AFTER_HOURS" "${STOP_AFTER_HOURS}"
+  append_qsub_var "RESUBMIT_COUNT" "${next_count}"
+  append_qsub_var "MAX_RESUBMITS" "${MAX_RESUBMITS}"
+  varlist="$(IFS=,; echo "${RESUBMIT_VARS[*]}")"
+
+  echo "Submitting ACE resume job after current job exits: qsub -W depend=afterany:${PBS_JOBID} -v ${varlist} ${REPO_ROOT}/scripts/submit_tc_conditioned_ace.pbs"
+  qsub -W "depend=afterany:${PBS_JOBID}" -v "${varlist}" "${REPO_ROOT}/scripts/submit_tc_conditioned_ace.pbs"
+  qsub_status=$?
+  if (( qsub_status == 0 )); then
+    if [[ -n "${RESUBMIT_QUEUED_FLAG:-}" ]]; then
+      touch "${RESUBMIT_QUEUED_FLAG}" 2>/dev/null || true
+    fi
+  else
+    echo "WARNING: failed to submit ACE resume job; qsub status=${qsub_status}"
+  fi
+  return "${qsub_status}"
+}
+
+start_resubmit_watchdog() {
+  local delay_seconds
+
+  if [[ "${AUTO_RESUBMIT_ACTIVE}" != "1" ]]; then
+    echo "AUTO_RESUBMIT disabled: AUTO_RESUBMIT=${AUTO_RESUBMIT}, RESUBMIT_COUNT=${RESUBMIT_COUNT}, MAX_RESUBMITS=${MAX_RESUBMITS}"
+    return 0
+  fi
+  if [[ -z "${PBS_JOBID:-}" ]]; then
+    echo "AUTO_RESUBMIT requested, but PBS_JOBID is not set; watchdog disabled."
+    return 0
+  fi
+  RESUBMIT_DONE_FLAG="${TMPDIR:-/tmp}/geos_tc_ace_done_${PBS_JOBID}"
+  RESUBMIT_QUEUED_FLAG="${TMPDIR:-/tmp}/geos_tc_ace_resume_queued_${PBS_JOBID}"
+  rm -f "${RESUBMIT_DONE_FLAG}"
+  rm -f "${RESUBMIT_QUEUED_FLAG}"
+  delay_seconds="$(hours_to_seconds "${RESUBMIT_AFTER_HOURS}")"
+  (
+    sleep "${delay_seconds}"
+    if [[ -f "${RESUBMIT_DONE_FLAG}" ]]; then
+      exit 0
+    fi
+    echo "AUTO_RESUBMIT timer passed after ${RESUBMIT_AFTER_HOURS} hours at $(date)."
+    submit_resume_job
+  ) &
+  RESUBMIT_WATCHDOG_PID=$!
+  echo "AUTO_RESUBMIT watchdog started: pid=${RESUBMIT_WATCHDOG_PID}, delay_seconds=${delay_seconds}, resume_count=${RESUBMIT_COUNT}"
+}
+
+cleanup_resubmit_watchdog() {
+  if [[ -n "${RESUBMIT_DONE_FLAG:-}" ]]; then
+    touch "${RESUBMIT_DONE_FLAG}" 2>/dev/null || true
+  fi
+  if [[ -n "${RESUBMIT_WATCHDOG_PID:-}" ]] && kill -0 "${RESUBMIT_WATCHDOG_PID}" 2>/dev/null; then
+    kill "${RESUBMIT_WATCHDOG_PID}" 2>/dev/null || true
+  fi
+}
+
+trap cleanup_resubmit_watchdog EXIT
+
 cd "${REPO_ROOT}"
 
 if [[ -z "${INIT_DATE}" ]]; then
@@ -143,6 +269,13 @@ echo "GEOS_THRESHOLDS=${GEOS_THRESHOLDS}"
 echo "THRESHOLD_COLUMN=${THRESHOLD_COLUMN}"
 echo "CACHE_DIR=${CACHE_DIR}"
 echo "PLOT_DIR=${PLOT_DIR}"
+echo "FORCE_RECOMPUTE=${FORCE_RECOMPUTE}"
+echo "AUTO_RESUBMIT=${AUTO_RESUBMIT}"
+echo "AUTO_RESUBMIT_ACTIVE=${AUTO_RESUBMIT_ACTIVE}"
+echo "RESUBMIT_AFTER_HOURS=${RESUBMIT_AFTER_HOURS}"
+echo "RESUBMIT_COUNT=${RESUBMIT_COUNT}"
+echo "MAX_RESUBMITS=${MAX_RESUBMITS}"
+echo "STOP_AFTER_HOURS=${STOP_AFTER_HOURS}"
 echo "CONDA_ENV=${CONDA_ENV}"
 echo "CONDA_BASE=${CONDA_BASE:-auto}"
 echo "PYTHON_BIN=${PYTHON_BIN:-auto}"
@@ -175,6 +308,8 @@ if (( dep_status != 0 )); then
   exit 8
 fi
 
+start_resubmit_watchdog
+
 cmd=(
   "${PYTHON_BIN}" -u scripts/calculate_tc_conditioned_ace.py
   --sfc-root "${SFC_ROOT}"
@@ -194,6 +329,7 @@ cmd=(
   --environment-radius-deg "${ENVIRONMENT_RADIUS_DEG}"
   --inner-core-radius-deg "${INNER_CORE_RADIUS_DEG}"
   --wind-search-radius-deg "${WIND_SEARCH_RADIUS_DEG}"
+  --stop-after-hours "${STOP_AFTER_HOURS}"
 )
 
 if [[ "${FORCE_RECOMPUTE}" == "1" ]]; then

@@ -27,6 +27,7 @@ import math
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -893,6 +894,14 @@ def write_member_summary_csv(
     print(f"Wrote member ACE summary: {output_path}")
 
 
+def stop_after_hours_reached(args: argparse.Namespace) -> bool:
+    stop_after_hours = float(getattr(args, "stop_after_hours", 0.0))
+    if stop_after_hours <= 0.0:
+        return False
+    start_monotonic = float(getattr(args, "_start_monotonic", time.monotonic()))
+    return (time.monotonic() - start_monotonic) >= stop_after_hours * 3600.0
+
+
 def plot_ace_diagnostics(
     local_ace: np.ndarray,
     cumulative_ace_time: np.ndarray,
@@ -1347,11 +1356,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Generate visual diagnostic plots for each individual ensemble member (default: False)",
     )
+    parser.add_argument(
+        "--stop-after-hours",
+        type=float,
+        default=0.0,
+        help="If positive, stop cleanly after this many elapsed hours after finishing the current ensemble member.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.stop_after_hours < 0.0:
+        print("ERROR: --stop-after-hours must be >= 0", file=sys.stderr)
+        return 1
+    args._start_monotonic = time.monotonic()
     args.plot_individual = False
     plot_dir = Path(args.plot_dir)
     threshold_csv = Path(args.geos_thresholds) if args.geos_thresholds else None
@@ -1427,9 +1446,10 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 80)
 
     processed_count = 0
+    stopped_early = False
     all_member_results = []
 
-    for ens_member in ens_list:
+    for member_index, ens_member in enumerate(ens_list):
         print("\n" + "-" * 80)
         print(f"PROCESSING ENSEMBLE MEMBER: {ens_member}")
         print("-" * 80)
@@ -1480,6 +1500,13 @@ def main(argv: list[str] | None = None) -> int:
                 all_member_results.append((ens_member, c_lats, c_lons, c_times, c_local_ace, np_diagnostics, c_vort, c_monthly))
                 processed_count += 1
                 print(f"[Cache] Completed member '{ens_member}' using cached diagnostics.")
+                if member_index < len(ens_list) - 1 and stop_after_hours_reached(args):
+                    print(
+                        f"Stop-after-hours reached after member '{ens_member}'. "
+                        "Stopping before ensemble mean; a resume job can continue from member caches."
+                    )
+                    stopped_early = True
+                    break
                 continue
             except Exception as e:
                 print(f"[Cache Warning] Failed to read existing cache '{member_cache_path.name}': {e}. Reverting to raw data processing.")
@@ -1830,6 +1857,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{basin_name:18s} total_ace={total_ace:8.2f}  tc_hits={hits}")
             print("=" * 80)
             processed_count += 1
+            if member_index < len(ens_list) - 1 and stop_after_hours_reached(args):
+                print(
+                    f"Stop-after-hours reached after member '{ens_member}'. "
+                    "Stopping before ensemble mean; a resume job can continue from member caches."
+                )
+                stopped_early = True
+                break
 
         except Exception as e:
             print(f"ERROR: Failed processing ensemble member '{ens_member}': {e}")
@@ -1837,6 +1871,20 @@ def main(argv: list[str] | None = None) -> int:
             traceback.print_exc()
         finally:
             sfc_index.close()
+
+    if stopped_early:
+        if all_member_results:
+            member_summary_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_member_summary.csv"
+            write_member_summary_csv(
+                output_path=member_summary_path,
+                init_date=args.init_date,
+                member_results=all_member_results,
+                basin_thresholds=basin_thresholds,
+                threshold_mode=threshold_mode,
+                threshold_source=threshold_source,
+            )
+        print("Clean early stop complete. Existing member caches will be reused by the resume job.")
+        return 0
 
     if processed_count == 0:
         print("ERROR: No ensemble members were successfully processed.", file=sys.stderr)
