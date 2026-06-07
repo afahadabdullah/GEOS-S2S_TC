@@ -908,7 +908,51 @@ def progress_bar(done: int, total: int, width: int = 28) -> str:
     done = max(0, min(done, total))
     filled = int(round(width * done / total))
     pct = 100.0 * done / total
-    return f"[{'#' * filled}{'-' * (width - filled)}] {done}/{total} ({pct:5.1f}%)"
+    return f"[{'#' * filled}{'-' * (width - filled)}] {pct:5.1f}%"
+
+
+class PercentProgress:
+    """Compact percentage progress that does not emit file names or file counts."""
+
+    def __init__(self, label: str, total: int, interval_percent: float = 10.0) -> None:
+        self.label = label
+        self.total = int(total)
+        self.interval_percent = interval_percent if interval_percent > 0.0 else 10.0
+        self.next_percent = 0.0
+        self.last_percent: float | None = None
+        self.is_tty = sys.stdout.isatty()
+        self.last_line_length = 0
+
+    def _write(self, percent: float) -> None:
+        rounded = round(percent, 1)
+        if self.last_percent is not None and rounded == self.last_percent:
+            return
+        self.last_percent = rounded
+        message = f"{self.label}: {rounded:5.1f}%"
+        if self.is_tty:
+            padding = " " * max(0, self.last_line_length - len(message))
+            sys.stdout.write(f"\r{message}{padding}")
+            sys.stdout.flush()
+            self.last_line_length = len(message)
+        else:
+            print(message, flush=True)
+
+    def update(self, done: int) -> None:
+        if self.total <= 0:
+            return
+        percent = 100.0 * max(0, min(done, self.total)) / self.total
+        if percent + 1e-9 < self.next_percent and done < self.total:
+            return
+        self._write(percent)
+        while self.next_percent <= percent + 1e-9:
+            self.next_percent += self.interval_percent
+
+    def finish(self) -> None:
+        if self.total > 0:
+            self._write(100.0)
+        if self.is_tty:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
 
 def cache_matches_threshold(
@@ -1385,6 +1429,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.0,
         help="If positive, stop cleanly after this many elapsed hours after finishing the current ensemble member.",
     )
+    parser.add_argument(
+        "--progress-interval-percent",
+        type=float,
+        default=float(os.environ.get("ACE_PROGRESS_INTERVAL_PERCENT", "10.0")),
+        help="ATM file progress reporting interval in percent. Default: 10.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1392,6 +1442,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.stop_after_hours < 0.0:
         print("ERROR: --stop-after-hours must be >= 0", file=sys.stderr)
+        return 1
+    if args.progress_interval_percent <= 0.0:
+        print("ERROR: --progress-interval-percent must be > 0", file=sys.stderr)
         return 1
     args._start_monotonic = time.monotonic()
     args.plot_individual = False
@@ -1501,11 +1554,11 @@ def main(argv: list[str] | None = None) -> int:
                 args.ts_threshold,
             )
             if not cache_matches:
-                print(f"[Cache] Existing cache threshold signature differs for '{ens_member}'; recomputing {member_cache_path.name}")
+                print(f"[Cache] Existing cache threshold signature differs for '{ens_member}'; recomputing.")
             else:
-                print(f"[Cache] Found matching cache for '{ens_member}': {member_cache_path.name}")
+                print(f"[Cache] Found matching cache for '{ens_member}'.")
         elif member_cache_path.is_file() and args.force_recompute:
-            print(f"[Cache] Forcing recompute for '{ens_member}': {member_cache_path.name}")
+            print(f"[Cache] Forcing recompute for '{ens_member}'.")
         if member_cache_path.is_file() and cache_matches:
             try:
                 c_init, c_ens, c_lats, c_lons, c_times, c_local_ace, c_diag, c_vort, c_monthly = read_cache(member_cache_path)
@@ -1538,7 +1591,7 @@ def main(argv: list[str] | None = None) -> int:
                 all_member_results.append((ens_member, c_lats, c_lons, c_times, c_local_ace, np_diagnostics, c_vort, c_monthly))
                 processed_count += 1
                 print(f"[Cache] Completed member '{ens_member}' using cached diagnostics.")
-                print(f"ACE member progress {args.init_date}: {progress_bar(processed_count, len(ens_list))} latest={ens_member}")
+                print(f"ACE member progress {args.init_date}: {progress_bar(processed_count, len(ens_list))}")
                 if member_index < len(ens_list) - 1 and stop_after_hours_reached(args):
                     print(
                         f"Stop-after-hours reached after member '{ens_member}'. "
@@ -1612,8 +1665,6 @@ def main(argv: list[str] | None = None) -> int:
             valid_times: list[datetime] = []
             uses_vorticity = False
 
-            print(f"SFC files: {len(sfc_files)} | ATM files: {len(atm_files)}")
-
             # Filter active ATM files first to have correct progress bar totals
             active_atm_files = []
             for atm_path in atm_files:
@@ -1622,13 +1673,13 @@ def main(argv: list[str] | None = None) -> int:
                     active_atm_files.append(atm_path)
 
             total_files = len(active_atm_files)
+            atm_progress = PercentProgress(
+                f"ATM read progress {args.init_date} {ens_member}",
+                total_files,
+                args.progress_interval_percent,
+            )
+            atm_progress.update(0)
             for idx, atm_path in enumerate(active_atm_files):
-                # Update visual progress bar on a single line
-                percent = 100.0 * (idx + 1) / total_files
-                filled_length = int(40 * (idx + 1) // total_files)
-                bar = '█' * filled_length + '-' * (40 - filled_length)
-                sys.stdout.write(f"\r  Reading ATM files |{bar}| {percent:.1f}% ({idx+1}/{total_files}) - {atm_path.name:<60}")
-                sys.stdout.flush()
                 with netCDF4.Dataset(atm_path, "r") as ds:
                     slp_name = find_first_variable(ds, SLP_CANDIDATES)
                     t_name = find_first_variable(ds, T_CANDIDATES)
@@ -1838,10 +1889,9 @@ def main(argv: list[str] | None = None) -> int:
                             basin_diag["qv850_anom_gpkg"].append(float(qv_anom))
                             basin_diag["vort850_s1"].append(float(vort850))
                             basin_diag["ts_threshold_kt"].append(basin_ts_threshold)
+                atm_progress.update(idx + 1)
 
-            if active_atm_files:
-                sys.stdout.write('\n')
-                sys.stdout.flush()
+            atm_progress.finish()
 
             if not valid_times:
                 print(f"WARNING: No valid ATM/SFC time matches were processed for '{ens_member}'. Skipping cache/plot generation.")
@@ -1889,14 +1939,14 @@ def main(argv: list[str] | None = None) -> int:
             all_member_results.append((ens_member, latitudes, longitudes, valid_times, local_ace, np_diagnostics, uses_vorticity, local_ace_monthly))
 
             print("=" * 80)
-            print(f"Wrote cache: {output_path}")
+            print(f"Wrote cache for member '{ens_member}'.")
             for basin_name in BASINS:
                 total_ace = diagnostics[basin_name]["cumulative_ace"][-1]
                 hits = int(np.sum(diagnostics[basin_name]["tc_flag"]))
                 print(f"{basin_name:18s} total_ace={total_ace:8.2f}  tc_hits={hits}")
             print("=" * 80)
             processed_count += 1
-            print(f"ACE member progress {args.init_date}: {progress_bar(processed_count, len(ens_list))} latest={ens_member}")
+            print(f"ACE member progress {args.init_date}: {progress_bar(processed_count, len(ens_list))}")
             if member_index < len(ens_list) - 1 and stop_after_hours_reached(args):
                 print(
                     f"Stop-after-hours reached after member '{ens_member}'. "

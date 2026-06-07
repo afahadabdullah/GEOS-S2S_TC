@@ -50,6 +50,7 @@ ENVIRONMENT_RADIUS_DEG="${ENVIRONMENT_RADIUS_DEG:-5.0}"
 INNER_CORE_RADIUS_DEG="${INNER_CORE_RADIUS_DEG:-1.5}"
 WIND_SEARCH_RADIUS_DEG="${WIND_SEARCH_RADIUS_DEG:-3.0}"
 FORCE_RECOMPUTE="${FORCE_RECOMPUTE:-0}"
+ACE_PROGRESS_INTERVAL_PERCENT="${ACE_PROGRESS_INTERVAL_PERCENT:-10.0}"
 CONDA_ENV="${CONDA_ENV:-earth}"
 CONDA_BASE="${CONDA_BASE:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
@@ -265,6 +266,7 @@ submit_resume_job() {
   append_qsub_var "INNER_CORE_RADIUS_DEG" "${INNER_CORE_RADIUS_DEG}"
   append_qsub_var "WIND_SEARCH_RADIUS_DEG" "${WIND_SEARCH_RADIUS_DEG}"
   append_qsub_var "FORCE_RECOMPUTE" "0"
+  append_qsub_var "ACE_PROGRESS_INTERVAL_PERCENT" "${ACE_PROGRESS_INTERVAL_PERCENT}"
   append_qsub_var "CONDA_ENV" "${CONDA_ENV}"
   append_qsub_var "CONDA_BASE" "${CONDA_BASE}"
   append_qsub_var "PYTHON_BIN" "${PYTHON_BIN}"
@@ -373,6 +375,7 @@ echo "THRESHOLD_COLUMN=${THRESHOLD_COLUMN}"
 echo "CACHE_DIR=${CACHE_DIR}"
 echo "PLOT_DIR=${PLOT_DIR}"
 echo "FORCE_RECOMPUTE=${FORCE_RECOMPUTE}"
+echo "ACE_PROGRESS_INTERVAL_PERCENT=${ACE_PROGRESS_INTERVAL_PERCENT}"
 echo "AUTO_RESUBMIT=${AUTO_RESUBMIT}"
 echo "AUTO_RESUBMIT_ACTIVE=${AUTO_RESUBMIT_ACTIVE}"
 echo "RESUBMIT_AFTER_HOURS=${RESUBMIT_AFTER_HOURS}"
@@ -423,9 +426,16 @@ for current_init in "${INIT_DATES[@]}"; do
   fi
 
   current_stop_hours="$(remaining_stop_hours)"
+  batch_percent="$(awk -v done="${attempted_init_count}" -v total="${#INIT_DATES[@]}" 'BEGIN {
+    if (total <= 0) {
+      printf "0.0"
+    } else {
+      printf "%.1f", 100.0 * done / total
+    }
+  }')"
   echo ""
   echo "================================================================================"
-  echo "ACE batch progress: init $((attempted_init_count + 1))/${#INIT_DATES[@]} current=${current_init} remaining_stop_hours=${current_stop_hours}"
+  echo "ACE batch progress: ${batch_percent}% current_init=${current_init} remaining_stop_hours=${current_stop_hours}"
   echo "================================================================================"
 
   cmd=(
@@ -448,6 +458,7 @@ for current_init in "${INIT_DATES[@]}"; do
     --inner-core-radius-deg "${INNER_CORE_RADIUS_DEG}"
     --wind-search-radius-deg "${WIND_SEARCH_RADIUS_DEG}"
     --stop-after-hours "${current_stop_hours}"
+    --progress-interval-percent "${ACE_PROGRESS_INTERVAL_PERCENT}"
   )
 
   if [[ "${FORCE_RECOMPUTE}" == "1" ]]; then
@@ -460,8 +471,19 @@ for current_init in "${INIT_DATES[@]}"; do
 
   echo "Finished INIT_DATE=${current_init}: $(date)"
   echo "Exit status for INIT_DATE=${current_init}: ${status}"
-  echo "ACE cache files for INIT_DATE=${current_init}:"
-  find "${CACHE_DIR}" -maxdepth 1 \( -name "tc_conditioned_ace_${current_init}_*.nc4" -o -name "tc_conditioned_ace_${current_init}_member_summary.csv" \) -print | sort
+  member_cache_count=0
+  while IFS= read -r _cache_file; do
+    member_cache_count=$((member_cache_count + 1))
+  done < <(find "${CACHE_DIR}" -maxdepth 1 -name "tc_conditioned_ace_${current_init}_*.nc4" ! -name "tc_conditioned_ace_${current_init}_ensmean.nc4" -print)
+  ensmean_status="missing"
+  if [[ -f "${CACHE_DIR}/tc_conditioned_ace_${current_init}_ensmean.nc4" ]]; then
+    ensmean_status="done"
+  fi
+  summary_status="missing"
+  if [[ -f "${CACHE_DIR}/tc_conditioned_ace_${current_init}_member_summary.csv" ]]; then
+    summary_status="done"
+  fi
+  echo "ACE cache summary for INIT_DATE=${current_init}: member_caches=${member_cache_count} ensmean=${ensmean_status} member_summary=${summary_status}"
 
   if (( status != 0 )); then
     echo "ERROR: stopping ACE batch because INIT_DATE=${current_init} failed with status ${status}."
