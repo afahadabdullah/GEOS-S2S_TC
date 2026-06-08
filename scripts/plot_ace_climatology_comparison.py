@@ -111,6 +111,13 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     print(f"  -> Wrote {path}")
 
 
+def read_csv(path: Path) -> list[dict[str, object]]:
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    print(f"  -> Read cached table {path}")
+    return rows
+
+
 def row_for_basin(rows: list[dict[str, object]], basin_name: str) -> dict[str, object]:
     for row in rows:
         if row["basin_name"] == basin_name:
@@ -191,6 +198,21 @@ def spatial_climatology(used_files: dict[int, list[Path]]) -> tuple[np.ndarray, 
     return ref_lats, ref_lons, np.nanmean(np.stack(yearly_grids, axis=0), axis=0)
 
 
+def save_spatial_cache(path: Path, latitudes: np.ndarray, longitudes: np.ndarray, ace_mean: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, lat=latitudes, lon=longitudes, ace_mean=ace_mean)
+    print(f"  -> Wrote spatial cache {path}")
+
+
+def load_spatial_cache(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    with np.load(path) as data:
+        latitudes = np.asarray(data["lat"], dtype="float64")
+        longitudes = np.asarray(data["lon"], dtype="float64")
+        ace_mean = np.asarray(data["ace_mean"], dtype="float64")
+    print(f"  -> Read spatial cache {path}")
+    return latitudes, longitudes, ace_mean
+
+
 def plot_spatial_map(
     latitudes: np.ndarray,
     longitudes: np.ndarray,
@@ -262,6 +284,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--years", default="1991:2024")
     parser.add_argument("--cache-kind", choices=("auto", "lagged", "init", "all"), default="auto")
     parser.add_argument("--prefix", default="geos_ibtracs_ace_climatology")
+    parser.add_argument("--summary-cache", default="", help="Cached climatology CSV. Default is <plot-dir>/<prefix>.csv.")
+    parser.add_argument(
+        "--yearly-summary-cache",
+        default="",
+        help="Optional yearly summary CSV from plot_ace_yearly_timeseries.py to avoid reopening GEOS/IBTrACS files.",
+    )
+    parser.add_argument(
+        "--spatial-cache",
+        default="",
+        help="Cached spatial mean NPZ. Default is <plot-dir>/<prefix>_geos_spatial_mean.npz.",
+    )
+    parser.add_argument("--refresh-spatial-cache", action="store_true", help="Rebuild the spatial NPZ cache from NetCDF inputs.")
+    parser.add_argument("--use-cached-summary", action="store_true", help="Read cached climatology/spatial tables and redraw plots.")
+    parser.add_argument("--skip-spatial-map", action="store_true", help="Only make tabular/basin climatology plots.")
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--ibtracs", default=DEFAULT_IBTRACS)
     parser.add_argument("--months", default="09:10")
@@ -281,62 +317,102 @@ def main(argv: list[str] | None = None) -> int:
     years = parse_years(args.years) if args.years else set()
     cache_dir = Path(args.cache_dir)
     plot_dir = Path(args.plot_dir)
-    files_by_year = discover_cache_files(cache_dir, years, args.cache_kind)
-    if not files_by_year:
-        print(f"ERROR: no ACE ensmean caches found in {cache_dir}", file=sys.stderr)
-        return 1
+    summary_cache = Path(args.summary_cache) if args.summary_cache else plot_dir / f"{args.prefix}.csv"
+    spatial_cache = Path(args.spatial_cache) if args.spatial_cache else plot_dir / f"{args.prefix}_geos_spatial_mean.npz"
 
-    yearly_rows, used_files = summarize_caches(files_by_year)
-    used_years = sorted(used_files)
-    if not used_years:
-        print(f"ERROR: no usable ACE caches found in {cache_dir}", file=sys.stderr)
-        return 1
-    if years:
-        missing = sorted(years - set(used_years))
-        if missing:
-            print(f"Missing requested years with usable caches: {', '.join(str(year) for year in missing)}")
-    print(f"Using GEOS ACE years: {', '.join(str(year) for year in used_years)}")
+    if args.use_cached_summary:
+        if not summary_cache.exists():
+            print(f"ERROR: cached climatology summary does not exist: {summary_cache}", file=sys.stderr)
+            return 1
+        clim_rows = read_csv(summary_cache)
+        used_files = {}
+    else:
+        used_files = {}
+        if args.yearly_summary_cache:
+            yearly_rows = read_csv(Path(args.yearly_summary_cache))
+            used_years = sorted({int(row["year"]) for row in yearly_rows})
+            print(f"Using cached yearly summary years: {', '.join(str(year) for year in used_years)}")
+        else:
+            files_by_year = discover_cache_files(cache_dir, years, args.cache_kind)
+            if not files_by_year:
+                print(f"ERROR: no ACE ensmean caches found in {cache_dir}", file=sys.stderr)
+                return 1
 
-    ibtracs_path = Path(args.ibtracs) if args.ibtracs else None
-    if ibtracs_path is not None:
-        months = parse_months(args.months)
-        print(
-            "Reading IBTrACS observed ACE: "
-            f"years={used_years[0]}:{used_years[-1]}, months={','.join(sorted(months))}, "
-            f"wind={args.wind_var}, threshold={args.threshold_kt:g} kt, nature={args.nature_filter or 'ALL'}"
-        )
-        ibtracs_ace, ibtracs_fix_counts = read_ibtracs_observed_ace(
-            ibtracs_path,
-            years=set(used_years),
-            months=months,
-            wind_var=args.wind_var,
-            threshold_kt=args.threshold_kt,
-            nature_filter=args.nature_filter,
-            basin_method=args.basin_method,
-            synoptic_only=args.synoptic_only,
-            ocean_only=args.ocean_only,
-            ocean_mask_source=args.ocean_mask_source,
-            ocean_mask_file=args.ocean_mask_file,
-            ocean_threshold=args.ocean_threshold,
-        )
-        add_ibtracs_to_rows(yearly_rows, ibtracs_ace, ibtracs_fix_counts)
+            yearly_rows, used_files = summarize_caches(files_by_year)
+            used_years = sorted(used_files)
+            if not used_years:
+                print(f"ERROR: no usable ACE caches found in {cache_dir}", file=sys.stderr)
+                return 1
+            if years:
+                missing = sorted(years - set(used_years))
+                if missing:
+                    print(f"Missing requested years with usable caches: {', '.join(str(year) for year in missing)}")
+            print(f"Using GEOS ACE years: {', '.join(str(year) for year in used_years)}")
 
-    clim_rows = climatology_rows(yearly_rows, used_years)
+            ibtracs_path = Path(args.ibtracs) if args.ibtracs else None
+            if ibtracs_path is not None:
+                months = parse_months(args.months)
+                print(
+                    "Reading IBTrACS observed ACE: "
+                    f"years={used_years[0]}:{used_years[-1]}, months={','.join(sorted(months))}, "
+                    f"wind={args.wind_var}, threshold={args.threshold_kt:g} kt, nature={args.nature_filter or 'ALL'}"
+                )
+                ibtracs_ace, ibtracs_fix_counts = read_ibtracs_observed_ace(
+                    ibtracs_path,
+                    years=set(used_years),
+                    months=months,
+                    wind_var=args.wind_var,
+                    threshold_kt=args.threshold_kt,
+                    nature_filter=args.nature_filter,
+                    basin_method=args.basin_method,
+                    synoptic_only=args.synoptic_only,
+                    ocean_only=args.ocean_only,
+                    ocean_mask_source=args.ocean_mask_source,
+                    ocean_mask_file=args.ocean_mask_file,
+                    ocean_threshold=args.ocean_threshold,
+                )
+                add_ibtracs_to_rows(yearly_rows, ibtracs_ace, ibtracs_fix_counts)
+
+        clim_rows = climatology_rows(yearly_rows, used_years)
+        write_csv(summary_cache, clim_rows)
+
     plot_dir.mkdir(parents=True, exist_ok=True)
-    write_csv(plot_dir / f"{args.prefix}.csv", clim_rows)
     plot_climatology_bars(clim_rows, plot_dir / f"{args.prefix}_by_basin.png", args.dpi)
     plot_ratio_bars(clim_rows, plot_dir / f"{args.prefix}_geos_to_ibtracs_ratio.png", args.dpi)
 
-    lats, lons, ace_mean = spatial_climatology(used_files)
-    plot_spatial_map(
-        latitudes=lats,
-        longitudes=lons,
-        ace_mean=ace_mean,
-        path=plot_dir / f"{args.prefix}_geos_spatial_mean_map.png",
-        dpi=args.dpi,
-        min_lat=args.min_lat,
-        max_lat=args.max_lat,
-    )
+    if not args.skip_spatial_map:
+        if args.use_cached_summary:
+            if not spatial_cache.exists():
+                print(f"WARNING: spatial cache does not exist, skipping spatial map: {spatial_cache}")
+            else:
+                lats, lons, ace_mean = load_spatial_cache(spatial_cache)
+                plot_spatial_map(
+                    latitudes=lats,
+                    longitudes=lons,
+                    ace_mean=ace_mean,
+                    path=plot_dir / f"{args.prefix}_geos_spatial_mean_map.png",
+                    dpi=args.dpi,
+                    min_lat=args.min_lat,
+                    max_lat=args.max_lat,
+                )
+        else:
+            if spatial_cache.exists() and not args.refresh_spatial_cache:
+                lats, lons, ace_mean = load_spatial_cache(spatial_cache)
+            elif used_files:
+                lats, lons, ace_mean = spatial_climatology(used_files)
+                save_spatial_cache(spatial_cache, lats, lons, ace_mean)
+            else:
+                print("WARNING: no selected GEOS cache files available for spatial map; use --spatial-cache or omit --yearly-summary-cache.")
+                return 0
+            plot_spatial_map(
+                latitudes=lats,
+                longitudes=lons,
+                ace_mean=ace_mean,
+                path=plot_dir / f"{args.prefix}_geos_spatial_mean_map.png",
+                dpi=args.dpi,
+                min_lat=args.min_lat,
+                max_lat=args.max_lat,
+            )
     return 0
 
 

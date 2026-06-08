@@ -487,6 +487,13 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     print(f"  -> Wrote {path}")
 
 
+def read_csv(path: Path) -> list[dict[str, object]]:
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    print(f"  -> Read cached summary {path}")
+    return rows
+
+
 def rows_for_basin(rows: list[dict[str, object]], basin_name: str) -> list[dict[str, object]]:
     return sorted([row for row in rows if row["basin_name"] == basin_name], key=lambda row: int(row["year"]))
 
@@ -587,6 +594,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_false",
         help="Disable lagged member-cache spread shading.",
     )
+    parser.add_argument(
+        "--summary-cache",
+        default="",
+        help="Cached yearly summary CSV. Default is <plot-dir>/<prefix>.csv.",
+    )
+    parser.add_argument(
+        "--use-cached-summary",
+        action="store_true",
+        help="Read the yearly summary CSV and only redraw plots.",
+    )
     parser.add_argument("--prefix", default="ace_yearly_timeseries")
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument(
@@ -629,6 +646,19 @@ def main(argv: list[str] | None = None) -> int:
     years = parse_years(args.years) if args.years else set()
     cache_dir = Path(args.cache_dir)
     plot_dir = Path(args.plot_dir)
+    summary_cache = Path(args.summary_cache) if args.summary_cache else plot_dir / f"{args.prefix}.csv"
+    if args.use_cached_summary:
+        if not summary_cache.exists():
+            print(f"ERROR: cached yearly summary does not exist: {summary_cache}", file=sys.stderr)
+            return 1
+        rows = read_csv(summary_cache)
+        if not rows:
+            print(f"ERROR: cached yearly summary is empty: {summary_cache}", file=sys.stderr)
+            return 1
+        plot_basin_panels(rows, plot_dir / f"{args.prefix}_by_basin.png", args.dpi)
+        plot_total(rows, plot_dir / f"{args.prefix}_all_basins.png", args.dpi)
+        return 0
+
     files_by_year = discover_cache_files(cache_dir, years, args.cache_kind)
     if not files_by_year:
         print(f"ERROR: no ACE ensmean caches found in {cache_dir}", file=sys.stderr)
