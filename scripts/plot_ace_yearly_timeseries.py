@@ -175,6 +175,31 @@ def discover_cache_files(cache_dir: Path, years: set[int], cache_kind: str) -> d
     return {year: paths for year, paths in selected.items() if paths}
 
 
+def discover_lagged_member_files(cache_dir: Path, year: int, init_dates: list[str]) -> list[Path]:
+    paths: list[Path] = []
+    for init_date_md in init_dates:
+        for path in sorted(cache_dir.glob(f"tc_conditioned_ace_{year}{init_date_md}_ens*.nc4")):
+            if path.name.endswith("_ensmean.nc4") or "lagged" in path.name:
+                continue
+            paths.append(path)
+    return sorted(paths)
+
+
+def read_cache_ace_values(path: Path) -> tuple[dict[str, float], dict[str, float]]:
+    _, _, _, _, _, _, diagnostics, _, _ = read_cache(path)
+    thresholds = thresholds_from_diagnostics(diagnostics)
+    values: dict[str, float] = {}
+    total = 0.0
+    for basin_name in BASIN_ORDER:
+        curve = np.asarray(diagnostics[basin_name]["cumulative_ace"], dtype="float64")
+        value = float(curve[-1]) if curve.size else float("nan")
+        values[basin_name] = value
+        if np.isfinite(value):
+            total += value
+    values["All Basins"] = total
+    return values, thresholds
+
+
 def setup_style() -> None:
     plt.rcParams["font.family"] = "sans-serif"
     plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Helvetica", "Arial", "sans-serif"]
@@ -183,42 +208,66 @@ def setup_style() -> None:
     plt.rcParams["figure.facecolor"] = "#ffffff"
 
 
-def summarize_caches(files_by_year: dict[int, list[Path]]) -> tuple[list[dict[str, object]], dict[int, list[Path]]]:
+def summarize_caches(
+    files_by_year: dict[int, list[Path]],
+    lagged_member_spread: bool = False,
+    lagged_init_dates: list[str] | None = None,
+) -> tuple[list[dict[str, object]], dict[int, list[Path]]]:
     rows: list[dict[str, object]] = []
     used_files: dict[int, list[Path]] = {}
+    lagged_init_dates = lagged_init_dates or ["0824", "0829"]
     for year, paths in sorted(files_by_year.items()):
         basin_values: dict[str, list[float]] = defaultdict(list)
         basin_thresholds: dict[str, list[float]] = defaultdict(list)
         good_paths: list[Path] = []
         for path in paths:
             try:
-                _, _, _, _, _, _, diagnostics, _, _ = read_cache(path)
+                values, thresholds = read_cache_ace_values(path)
             except Exception as exc:
                 print(f"WARNING: skipping unreadable cache {path}: {exc}")
                 continue
             good_paths.append(path)
-            thresholds = thresholds_from_diagnostics(diagnostics)
             for basin_name in BASIN_ORDER:
-                curve = np.asarray(diagnostics[basin_name]["cumulative_ace"], dtype="float64")
-                basin_values[basin_name].append(float(curve[-1]) if curve.size else float("nan"))
+                basin_values[basin_name].append(values.get(basin_name, float("nan")))
                 if basin_name in thresholds:
                     basin_thresholds[basin_name].append(float(thresholds[basin_name]))
+            basin_values["All Basins"].append(values.get("All Basins", float("nan")))
 
         if not good_paths:
             continue
         used_files[year] = good_paths
-        total_values = []
-        for cache_index in range(len(good_paths)):
-            total = 0.0
-            for basin_name in BASIN_ORDER:
-                values = basin_values[basin_name]
-                if cache_index < len(values) and np.isfinite(values[cache_index]):
-                    total += values[cache_index]
-            total_values.append(total)
+
+        spread_values: dict[str, list[float]] = defaultdict(list)
+        spread_paths: list[Path] = []
+        spread_source = "selected_caches"
+        selected_has_lagged = any(cache_year_and_kind(path)[1] == "lagged" for path in good_paths)
+        if lagged_member_spread and selected_has_lagged:
+            spread_paths = discover_lagged_member_files(good_paths[0].parent, year, lagged_init_dates)
+            if spread_paths:
+                spread_source = "lagged_members:" + ",".join(lagged_init_dates)
+                for spread_path in spread_paths:
+                    try:
+                        spread_cache_values, _ = read_cache_ace_values(spread_path)
+                    except Exception as exc:
+                        print(f"WARNING: skipping unreadable member-spread cache {spread_path}: {exc}")
+                        continue
+                    for basin_name in BASIN_ORDER + ["All Basins"]:
+                        spread_values[basin_name].append(spread_cache_values.get(basin_name, float("nan")))
+                print(f"Using {len(spread_paths)} lagged member cache(s) for {year} GEOS spread.")
+            else:
+                print(
+                    f"WARNING: no lagged member caches found for {year} init dates "
+                    f"{','.join(lagged_init_dates)}; using selected cache spread."
+                )
+
+        if not spread_values:
+            spread_values = basin_values
 
         for basin_name in BASIN_ORDER:
             values = np.asarray(basin_values[basin_name], dtype="float64")
             values = values[np.isfinite(values)]
+            spread = np.asarray(spread_values[basin_name], dtype="float64")
+            spread = spread[np.isfinite(spread)]
             thresholds = np.asarray(basin_thresholds[basin_name], dtype="float64")
             thresholds = thresholds[np.isfinite(thresholds)]
             rows.append(
@@ -226,22 +275,31 @@ def summarize_caches(files_by_year: dict[int, list[Path]]) -> tuple[list[dict[st
                     "year": year,
                     "basin_name": basin_name,
                     "mean_ace": float(np.nanmean(values)) if values.size else float("nan"),
-                    "std_ace": float(np.nanstd(values)) if values.size > 1 else 0.0,
+                    "std_ace": float(np.nanstd(spread)) if spread.size > 1 else 0.0,
                     "n_caches": int(values.size),
+                    "n_spread_members": int(spread.size),
+                    "spread_source": spread_source,
                     "threshold_kt": float(np.nanmean(thresholds)) if thresholds.size else float("nan"),
                     "cache_files": ",".join(path.name for path in good_paths),
+                    "spread_cache_files": ",".join(path.name for path in spread_paths),
                 }
             )
-        total_array = np.asarray(total_values, dtype="float64")
+        total_array = np.asarray(basin_values["All Basins"], dtype="float64")
+        total_array = total_array[np.isfinite(total_array)]
+        total_spread_array = np.asarray(spread_values["All Basins"], dtype="float64")
+        total_spread_array = total_spread_array[np.isfinite(total_spread_array)]
         rows.append(
             {
                 "year": year,
                 "basin_name": "All Basins",
                 "mean_ace": float(np.nanmean(total_array)) if total_array.size else float("nan"),
-                "std_ace": float(np.nanstd(total_array)) if total_array.size > 1 else 0.0,
+                "std_ace": float(np.nanstd(total_spread_array)) if total_spread_array.size > 1 else 0.0,
                 "n_caches": int(total_array.size),
+                "n_spread_members": int(total_spread_array.size),
+                "spread_source": spread_source,
                 "threshold_kt": float("nan"),
                 "cache_files": ",".join(path.name for path in good_paths),
+                "spread_cache_files": ",".join(path.name for path in spread_paths),
             }
         )
     return rows, used_files
@@ -410,18 +468,21 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "mean_ace",
         "std_ace",
         "n_caches",
+        "n_spread_members",
+        "spread_source",
         "threshold_kt",
         "ibtracs_ace",
         "ibtracs_fix_count",
         "geos_to_ibtracs_ratio",
         "cache_files",
+        "spread_cache_files",
     ]
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             for fieldname in fieldnames:
-                row.setdefault(fieldname, float("nan") if fieldname not in {"cache_files", "basin_name"} else "")
+                row.setdefault(fieldname, float("nan") if fieldname not in {"cache_files", "spread_cache_files", "spread_source", "basin_name"} else "")
             writer.writerow(row)
     print(f"  -> Wrote {path}")
 
@@ -441,7 +502,17 @@ def plot_basin_panels(rows: list[dict[str, object]], path: Path, dpi: int) -> No
         color = BASINS[basin_name]["color"]
         ax.plot(years, mean_values, marker="o", markersize=3.5, linewidth=1.7, color=color, label="GEOS")
         if np.any(std_values > 0):
-            ax.fill_between(years, mean_values - std_values, mean_values + std_values, color=color, alpha=0.15, linewidth=0)
+            lower = np.maximum(mean_values - std_values, 0.0)
+            upper = mean_values + std_values
+            ax.fill_between(
+                years,
+                lower,
+                upper,
+                color=color,
+                alpha=0.16,
+                linewidth=0,
+                label="GEOS member spread" if basin_name == BASIN_ORDER[0] else None,
+            )
         if np.any(np.isfinite(obs_values)):
             ax.plot(years, obs_values, marker="s", markersize=3.0, linewidth=1.5, color="#1e222a", linestyle="--", label="IBTrACS")
         ax.set_title(basin_name, fontsize=10, fontweight="bold")
@@ -468,7 +539,15 @@ def plot_total(rows: list[dict[str, object]], path: Path, dpi: int) -> None:
     fig, ax = plt.subplots(figsize=(10.5, 4.8), dpi=dpi)
     ax.plot(years, mean_values, marker="o", markersize=4, linewidth=2.0, color="#344e86", label="GEOS")
     if np.any(std_values > 0):
-        ax.fill_between(years, mean_values - std_values, mean_values + std_values, color="#344e86", alpha=0.15, linewidth=0)
+        ax.fill_between(
+            years,
+            np.maximum(mean_values - std_values, 0.0),
+            mean_values + std_values,
+            color="#344e86",
+            alpha=0.16,
+            linewidth=0,
+            label="GEOS member spread",
+        )
     if np.any(np.isfinite(obs_values)):
         ax.plot(years, obs_values, marker="s", markersize=3.5, linewidth=1.7, color="#1e222a", linestyle="--", label="IBTrACS")
     ax.set_title("Yearly All-Basin TC-Conditioned ACE", fontsize=12, fontweight="bold", pad=10)
@@ -490,6 +569,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plot-dir", default=DEFAULT_PLOT_DIR)
     parser.add_argument("--years", default="", help="Optional years, e.g. 1991:2024 or 1991,1992.")
     parser.add_argument("--cache-kind", choices=("auto", "lagged", "init", "all"), default="auto")
+    parser.add_argument(
+        "--lagged-init-dates",
+        default="0824,0829",
+        help="Month/day init dates to pool for lagged member spread, e.g. 0824,0829.",
+    )
+    parser.add_argument(
+        "--lagged-member-spread",
+        dest="lagged_member_spread",
+        action="store_true",
+        default=True,
+        help="Use individual member caches from --lagged-init-dates for GEOS shading when lagged caches are selected.",
+    )
+    parser.add_argument(
+        "--no-lagged-member-spread",
+        dest="lagged_member_spread",
+        action="store_false",
+        help="Disable lagged member-cache spread shading.",
+    )
     parser.add_argument("--prefix", default="ace_yearly_timeseries")
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument(
@@ -541,7 +638,11 @@ def main(argv: list[str] | None = None) -> int:
     for year, paths in files_by_year.items():
         print(f"  {year}: {', '.join(path.name for path in paths)}")
 
-    rows, used_files = summarize_caches(files_by_year)
+    rows, used_files = summarize_caches(
+        files_by_year,
+        lagged_member_spread=args.lagged_member_spread,
+        lagged_init_dates=parse_list(args.lagged_init_dates),
+    )
     used_years = sorted(used_files)
     if not rows or not used_years:
         print(f"ERROR: no usable ACE caches found in {cache_dir}", file=sys.stderr)

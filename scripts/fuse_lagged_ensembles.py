@@ -24,7 +24,14 @@ if str(scripts_dir) not in sys.path:
     sys.path.append(str(scripts_dir))
 
 try:
-    from calculate_tc_conditioned_ace import read_cache, write_cache, plot_ace_diagnostics, thresholds_from_diagnostics, BASINS
+    from calculate_tc_conditioned_ace import (
+        BASINS,
+        plot_ace_diagnostics,
+        read_cache,
+        thresholds_from_diagnostics,
+        write_cache,
+        write_member_summary_csv,
+    )
 except ImportError as e:
     print(f"ERROR: Could not import calculate_tc_conditioned_ace.py: {e}")
     sys.exit(1)
@@ -51,20 +58,25 @@ def fuse_year_lagged_ensemble(
 
     # 1. Discover all matching ensemble member cache files (excluding ensmean and lagged caches)
     cache_files: list[Path] = []
+    cache_files_by_init: dict[str, list[Path]] = {}
     for init_date_md in init_dates:
+        init_paths: list[Path] = []
         pattern = f"tc_conditioned_ace_{year}{init_date_md}_ens*.nc4"
         for p in cache_dir.glob(pattern):
             if not p.name.endswith("_ensmean.nc4") and "lagged" not in p.name:
                 cache_files.append(p)
+                init_paths.append(p)
+        cache_files_by_init[init_date_md] = sorted(init_paths)
+    cache_files = sorted(cache_files)
 
     if not cache_files:
         print(f"WARNING: No member cache files found for year {year} and init dates {init_dates} in {cache_dir}")
         print("Please run the calculate_tc_conditioned_ace.py pipeline for these dates first.")
         return
 
-    print(f"Found {len(cache_files)} ensemble member cache files:")
-    for f in cache_files:
-        print(f"  -> {f.name}")
+    print(f"Found {len(cache_files)} lagged ensemble member cache files.")
+    for init_date_md in init_dates:
+        print(f"  {year}{init_date_md}: {len(cache_files_by_init.get(init_date_md, []))} member(s)")
 
     # 2. Load all cache files
     member_lats: list[np.ndarray] = []
@@ -74,10 +86,12 @@ def fuse_year_lagged_ensemble(
     member_diagnostics: list[dict[str, dict[str, np.ndarray]]] = []
     member_uses_vorticity: list[bool] = []
     member_local_ace_monthly: list[dict[str, np.ndarray]] = []
+    member_results: list[tuple] = []
 
     for f in cache_files:
         try:
-            _, _, lats, lons, times, local_ace, diag, uses_vort, monthly = read_cache(f)
+            member_init_date, member_ens, lats, lons, times, local_ace, diag, uses_vort, monthly = read_cache(f)
+            member_label = f"{member_init_date}_{member_ens}"
             member_lats.append(lats)
             member_lons.append(lons)
             member_times.append(times)
@@ -85,6 +99,7 @@ def fuse_year_lagged_ensemble(
             member_diagnostics.append(diag)
             member_uses_vorticity.append(uses_vort)
             member_local_ace_monthly.append(monthly)
+            member_results.append((member_label, lats, lons, times, local_ace, diag, uses_vort, monthly))
         except Exception as e:
             print(f"ERROR reading cache file {f.name}: {e}")
             return
@@ -195,6 +210,15 @@ def fuse_year_lagged_ensemble(
         local_ace_monthly=fused_local_ace_monthly,
         basin_thresholds=basin_thresholds or None,
         threshold_mode="lagged_fused",
+        threshold_source="input member caches",
+    )
+    member_summary_path = cache_dir / f"tc_conditioned_ace_{year}_lagged_member_summary.csv"
+    write_member_summary_csv(
+        output_path=member_summary_path,
+        init_date=f"{year}_lagged",
+        member_results=member_results,
+        basin_thresholds=basin_thresholds or {},
+        threshold_mode="lagged_members",
         threshold_source="input member caches",
     )
 
