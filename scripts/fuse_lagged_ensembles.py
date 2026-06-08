@@ -43,6 +43,23 @@ def parse_list(value: str | None) -> list[str]:
     return [item for item in re.split(r"[\s,:]+", value.strip()) if item]
 
 
+def parse_years(value: str | None) -> list[str]:
+    if not value:
+        return []
+    years: set[int] = set()
+    for item in re.split(r"[\s,]+", value.strip()):
+        if not item:
+            continue
+        if ":" in item:
+            start_text, end_text = item.split(":", 1)
+            start_year = int(start_text)
+            end_year = int(end_text)
+            years.update(range(start_year, end_year + 1))
+        else:
+            years.add(int(item))
+    return [str(year) for year in sorted(years)]
+
+
 def fuse_year_lagged_ensemble(
     year: str,
     init_dates: list[str],
@@ -245,7 +262,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", default="data/cache", help="Directory where NetCDF cache files are stored")
     parser.add_argument("--plot-dir", default="plots", help="Directory where output plots will be saved")
-    parser.add_argument("--years", default="2020", help="Comma-separated list of years to process, or 'all'")
+    parser.add_argument("--years", default="1991:2024", help="Years to process, e.g. 1991:2024, 1991,1992, or all.")
     parser.add_argument("--init-dates", default="0824,0829", help="Comma-separated month/day init dates to combine")
     parser.add_argument("--months", default="09,10", help="Forecast months to use for monthly tracking, separated by commas")
     
@@ -268,7 +285,9 @@ def main() -> None:
                 years_set.add(match.group(1))
         years = sorted(list(years_set))
     else:
-        years = parse_list(args.years)
+        years = parse_years(args.years)
+
+    print(f"Selected years for lagged fusion: {', '.join(years)}")
 
     for year in years:
         fuse_year_lagged_ensemble(
