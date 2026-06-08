@@ -48,7 +48,13 @@ from plot_ace_yearly_timeseries import (
 DEFAULT_CANDIDATES = "data/calibration/*_candidates.csv"
 DEFAULT_OUTPUT_DIR = "data/analysis/ace_method_test"
 DEFAULT_PLOT_DIR = "plots/ace_method_test"
-DEFAULT_METHODS = "single_slp,single_vmax,top2_vmax,top3_vmax,sep5_vmax,sep8_vmax,sum_all"
+DEFAULT_METHODS = (
+    "sep5_vmax,sum_all,"
+    "structure+sep5_vmax,structure+sum_all,"
+    "slp_only+sep5_vmax,slp_warm+sep5_vmax,slp_qv+sep5_vmax,"
+    "slp_warm_qv+sep5_vmax,slp_warm_qv_vort+sep5_vmax,"
+    "slp_only+sum_all,slp_warm_qv+sum_all"
+)
 DEFAULT_THRESHOLDS = "0,5,8,10,12,15,17,20,22,25,28,30,35,40"
 ACE_SCALE_6H = 1.0e-4
 
@@ -67,6 +73,12 @@ class Candidate:
     vmax_kt: float
     slp_hpa: float
     over_ocean: bool | None
+    passes_slp_anom: int
+    passes_warm_core: int
+    passes_qv: int
+    passes_vorticity: int
+    passes_structure: int
+    accepted_candidate: int
 
 
 def parse_float(value: str | None) -> float:
@@ -76,6 +88,12 @@ def parse_float(value: str | None) -> float:
         return float(value)
     except ValueError:
         return float("nan")
+
+
+def parse_flag(value: str | None, default: int = 1) -> int:
+    if value is None or value == "":
+        return default
+    return int(str(value).strip().lower() in {"1", "1.0", "true", "t", "yes", "y"})
 
 
 def parse_datetime(value: str | None) -> datetime | None:
@@ -183,6 +201,12 @@ def read_candidates(paths: list[Path], args: argparse.Namespace) -> list[Candida
                 center_lon = normalize_lon(parse_float(raw.get("center_lon")))
                 vmax_kt = parse_float(raw.get("vmax_kt"))
                 slp_hpa = parse_float(raw.get("slp_hpa"))
+                passes_slp_anom = parse_flag(raw.get("passes_slp_anom"), default=1)
+                passes_warm_core = parse_flag(raw.get("passes_warm_core"), default=1)
+                passes_qv = parse_flag(raw.get("passes_qv"), default=1)
+                passes_vorticity = parse_flag(raw.get("passes_vorticity"), default=1)
+                passes_structure = parse_flag(raw.get("passes_structure"), default=1)
+                accepted_candidate = parse_flag(raw.get("accepted_candidate"), default=1)
                 if not (np.isfinite(center_lat) and np.isfinite(center_lon) and np.isfinite(vmax_kt)):
                     skipped += 1
                     continue
@@ -215,6 +239,12 @@ def read_candidates(paths: list[Path], args: argparse.Namespace) -> list[Candida
                         vmax_kt=vmax_kt,
                         slp_hpa=slp_hpa,
                         over_ocean=over_ocean,
+                        passes_slp_anom=passes_slp_anom,
+                        passes_warm_core=passes_warm_core,
+                        passes_qv=passes_qv,
+                        passes_vorticity=passes_vorticity,
+                        passes_structure=passes_structure,
+                        accepted_candidate=accepted_candidate,
                     )
                 )
 
@@ -255,16 +285,50 @@ def angular_distance_deg(a: Candidate, b: Candidate) -> float:
     return float(np.rad2deg(2.0 * np.arcsin(min(1.0, np.sqrt(h)))))
 
 
+def split_method(method: str) -> tuple[str, str]:
+    if "+" in method:
+        gate, aggregation = method.split("+", 1)
+        return gate.strip(), aggregation.strip()
+    return "accepted", method
+
+
+def gate_passes(candidate: Candidate, gate: str) -> bool:
+    if gate in {"accepted", "current", "current_all"}:
+        return bool(candidate.accepted_candidate)
+    if gate in {"structure", "structure_all"}:
+        return bool(candidate.passes_structure)
+    if gate == "slp_only":
+        return bool(candidate.passes_slp_anom)
+    if gate == "slp_warm":
+        return bool(candidate.passes_slp_anom and candidate.passes_warm_core)
+    if gate == "slp_qv":
+        return bool(candidate.passes_slp_anom and candidate.passes_qv)
+    if gate in {"slp_warm_qv", "slp_warm_qv_no_vort", "no_vort"}:
+        return bool(candidate.passes_slp_anom and candidate.passes_warm_core and candidate.passes_qv)
+    if gate in {"slp_warm_qv_vort", "with_vort"}:
+        return bool(
+            candidate.passes_slp_anom
+            and candidate.passes_warm_core
+            and candidate.passes_qv
+            and candidate.passes_vorticity
+        )
+    raise ValueError(f"Unknown gate method: {gate}")
+
+
 def select_candidates(group: list[Candidate], method: str, threshold: float) -> list[Candidate]:
     if not group:
         return []
+    gate, aggregation = split_method(method)
+    group = [candidate for candidate in group if gate_passes(candidate, gate)]
+    if not group:
+        return []
 
-    if method == "single_slp":
+    if aggregation == "single_slp":
         finite_slp = [candidate for candidate in group if np.isfinite(candidate.slp_hpa)]
         selected = min(finite_slp, key=lambda item: item.slp_hpa) if finite_slp else max(group, key=lambda item: item.vmax_kt)
         return [selected] if selected.vmax_kt >= threshold else []
 
-    if method == "single_vmax":
+    if aggregation == "single_vmax":
         selected = max(group, key=lambda item: item.vmax_kt)
         return [selected] if selected.vmax_kt >= threshold else []
 
@@ -272,14 +336,14 @@ def select_candidates(group: list[Candidate], method: str, threshold: float) -> 
     if not thresholded:
         return []
 
-    if method == "sum_all":
+    if aggregation == "sum_all":
         return thresholded
 
-    top_match = re.match(r"^top(\d+)_vmax$", method)
+    top_match = re.match(r"^top(\d+)_vmax$", aggregation)
     if top_match:
         return thresholded[: int(top_match.group(1))]
 
-    sep_match = re.match(r"^sep([0-9.]+)_vmax$", method)
+    sep_match = re.match(r"^sep([0-9.]+)_vmax$", aggregation)
     if sep_match:
         separation = float(sep_match.group(1))
         kept: list[Candidate] = []

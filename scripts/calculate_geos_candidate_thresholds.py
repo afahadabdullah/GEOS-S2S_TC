@@ -125,6 +125,14 @@ class CandidateRow:
     vort850_s1: float
     used_vorticity: int
     over_ocean: int
+    passes_slp_anom: int
+    passes_warm_core: int
+    passes_qv: int
+    passes_vorticity: int
+    passes_structure: int
+    passes_separation: int
+    accepted_candidate: int
+    rejection_reason: str
 
 
 def normalize_lon(lon: float) -> float:
@@ -346,7 +354,16 @@ def summarize_values(values: list[float]) -> dict[str, float | int]:
 
 
 def write_candidates_header(handle) -> csv.DictWriter:
-    fieldnames = [
+    fieldnames = write_candidate_fieldnames()
+    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+    writer.writeheader()
+    handle.flush()
+    writer._flush_handle = handle
+    return writer
+
+
+def write_candidate_fieldnames() -> list[str]:
+    return [
         "init_date",
         "ens",
         "valid_time",
@@ -368,12 +385,15 @@ def write_candidates_header(handle) -> csv.DictWriter:
         "vort850_s1",
         "used_vorticity",
         "over_ocean",
+        "passes_slp_anom",
+        "passes_warm_core",
+        "passes_qv",
+        "passes_vorticity",
+        "passes_structure",
+        "passes_separation",
+        "accepted_candidate",
+        "rejection_reason",
     ]
-    writer = csv.DictWriter(handle, fieldnames=fieldnames)
-    writer.writeheader()
-    handle.flush()
-    writer._flush_handle = handle
-    return writer
 
 
 def write_candidate(writer: csv.DictWriter, row: CandidateRow) -> None:
@@ -400,6 +420,14 @@ def write_candidate(writer: csv.DictWriter, row: CandidateRow) -> None:
             "vort850_s1": row.vort850_s1,
             "used_vorticity": row.used_vorticity,
             "over_ocean": row.over_ocean,
+            "passes_slp_anom": row.passes_slp_anom,
+            "passes_warm_core": row.passes_warm_core,
+            "passes_qv": row.passes_qv,
+            "passes_vorticity": row.passes_vorticity,
+            "passes_structure": row.passes_structure,
+            "passes_separation": row.passes_separation,
+            "accepted_candidate": row.accepted_candidate,
+            "rejection_reason": row.rejection_reason,
         }
     )
     flush_handle = getattr(writer, "_flush_handle", None)
@@ -553,6 +581,12 @@ def load_existing_candidates(
                 continue
             if not np.isfinite(vmax_kt):
                 continue
+            accepted_candidate_text = row.get("accepted_candidate", "")
+            if accepted_candidate_text not in {"", "1", "1.0", "true", "True", "TRUE"}:
+                candidate_keys.add(key)
+                basin_stats[basin_name]["resumed_existing_rejected_candidates"] += 1
+                loaded += 1
+                continue
             over_ocean = row_over_ocean_value(row)
             if ocean_only:
                 is_ocean = over_ocean is not False
@@ -579,36 +613,24 @@ def open_candidate_writer(path: Path, resume: bool) -> tuple[csv.DictWriter, obj
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if resume and path.exists() and path.stat().st_size > 0 else "w"
     handle = path.open(mode, newline="", buffering=1)
-    writer = write_candidates_header(handle) if mode == "w" else csv.DictWriter(handle, fieldnames=write_candidate_fieldnames())
+    if mode == "w":
+        writer = write_candidates_header(handle)
+    else:
+        existing_fieldnames = None
+        with path.open(newline="") as read_handle:
+            existing_fieldnames = csv.DictReader(read_handle).fieldnames
+        fieldnames = existing_fieldnames if existing_fieldnames else write_candidate_fieldnames()
+        missing = [name for name in write_candidate_fieldnames() if name not in fieldnames]
+        if missing:
+            print(
+                "WARNING: resuming candidate CSV with older schema; new all-center fields will not be appended: "
+                + ",".join(missing),
+                flush=True,
+            )
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
     if mode == "a":
         writer._flush_handle = handle
     return writer, handle
-
-
-def write_candidate_fieldnames() -> list[str]:
-    return [
-        "init_date",
-        "ens",
-        "valid_time",
-        "forecast_month",
-        "atm_file",
-        "atm_time_index",
-        "sfc_file",
-        "sfc_time_index",
-        "sfc_valid_time",
-        "sfc_delta_hours",
-        "basin_name",
-        "center_lat",
-        "center_lon",
-        "vmax_kt",
-        "slp_hpa",
-        "slp_anom_hpa",
-        "warm_core_anom_k",
-        "qv850_anom_gpkg",
-        "vort850_s1",
-        "used_vorticity",
-        "over_ocean",
-    ]
 
 
 def collect_candidates_for_member(
@@ -798,7 +820,7 @@ def collect_candidates_for_member(
 
                             accepted_centers: list[tuple[int, int]] = []
                             for center_lat_idx, center_lon_idx, center_slp in candidate_centers:
-                                if len(accepted_centers) >= args.max_centers_per_basin:
+                                if len(accepted_centers) >= args.max_centers_per_basin and not args.write_all_centers:
                                     basin_stats[basin_name]["max_centers_reached"] += 1
                                     break
                                 basin_stats[basin_name]["candidate_centers_evaluated"] += 1
@@ -843,34 +865,24 @@ def collect_candidates_for_member(
                                 slp_anom = float(center_slp - slp_env)
                                 warm_anom = float(warm_core_field[center_lat_idx, center_lon_idx] - warm_env)
                                 qv_anom = float(qv850[center_lat_idx, center_lon_idx] - qv_env)
-                                criteria = [
-                                    slp_anom < 0.0,
-                                    warm_anom > 0.0,
-                                    qv_anom > 0.0,
-                                ]
+                                passes_slp_anom = int(slp_anom < 0.0)
+                                passes_warm_core = int(warm_anom > 0.0)
+                                passes_qv = int(qv_anom > 0.0)
 
                                 vort850 = float("nan")
                                 used_vorticity = 0
+                                passes_vorticity = 1
                                 if u850 is not None and v850 is not None:
                                     vort850 = relative_vorticity(u850, v850, latitudes, longitudes, center_lat_idx, center_lon_idx)
                                     if np.isfinite(vort850):
                                         used_vorticity = 1
-                                        criteria.append(vort850 > 0.0 if center_lat >= 0.0 else vort850 < 0.0)
-
-                                if not all(criteria):
-                                    basin_stats[basin_name]["rejected_structure"] += 1
-                                    continue
-
-                                if is_too_close_to_accepted(
-                                    center_lat_idx,
-                                    center_lon_idx,
-                                    accepted_centers,
-                                    latitudes,
-                                    longitudes,
-                                    args.min_center_separation_deg,
-                                ):
-                                    basin_stats[basin_name]["duplicate_center"] += 1
-                                    continue
+                                        passes_vorticity = int(vort850 > 0.0 if center_lat >= 0.0 else vort850 < 0.0)
+                                passes_structure = int(
+                                    passes_slp_anom
+                                    and passes_warm_core
+                                    and passes_qv
+                                    and passes_vorticity
+                                )
 
                                 vmax_kt, _, _ = max_near_center(
                                     sfc_ws_kt,
@@ -882,6 +894,36 @@ def collect_candidates_for_member(
                                 if not np.isfinite(vmax_kt):
                                     basin_stats[basin_name]["missing_vmax"] += 1
                                     continue
+
+                                passes_separation = 1
+                                if passes_structure:
+                                    passes_separation = int(
+                                        not is_too_close_to_accepted(
+                                            center_lat_idx,
+                                            center_lon_idx,
+                                            accepted_centers,
+                                            latitudes,
+                                            longitudes,
+                                            args.min_center_separation_deg,
+                                        )
+                                    )
+
+                                accepted_candidate = int(
+                                    passes_structure
+                                    and passes_separation
+                                    and len(accepted_centers) < args.max_centers_per_basin
+                                )
+                                if accepted_candidate:
+                                    rejection_reason = "accepted"
+                                elif not passes_structure:
+                                    rejection_reason = "structure"
+                                    basin_stats[basin_name]["rejected_structure"] += 1
+                                elif not passes_separation:
+                                    rejection_reason = "duplicate"
+                                    basin_stats[basin_name]["duplicate_center"] += 1
+                                else:
+                                    rejection_reason = "max_centers"
+                                    basin_stats[basin_name]["max_centers_reached"] += 1
 
                                 candidate_row = CandidateRow(
                                     init_date=init_date,
@@ -905,18 +947,32 @@ def collect_candidates_for_member(
                                     vort850_s1=float(vort850),
                                     used_vorticity=used_vorticity,
                                     over_ocean=over_ocean,
+                                    passes_slp_anom=passes_slp_anom,
+                                    passes_warm_core=passes_warm_core,
+                                    passes_qv=passes_qv,
+                                    passes_vorticity=passes_vorticity,
+                                    passes_structure=passes_structure,
+                                    passes_separation=passes_separation,
+                                    accepted_candidate=accepted_candidate,
+                                    rejection_reason=rejection_reason,
                                 )
                                 candidate_key = candidate_key_from_candidate(candidate_row)
                                 if candidate_key in candidate_keys:
-                                    accepted_centers.append((center_lat_idx, center_lon_idx))
+                                    if accepted_candidate:
+                                        accepted_centers.append((center_lat_idx, center_lon_idx))
                                     basin_stats[basin_name]["duplicate_resume_candidate"] += 1
                                     continue
 
                                 candidate_keys.add(candidate_key)
-                                accepted_centers.append((center_lat_idx, center_lon_idx))
-                                basin_stats[basin_name]["accepted_candidates"] += 1
-                                geos_vmax_by_basin[basin_name].append(float(vmax_kt))
-                                write_candidate(candidate_writer, candidate_row)
+                                if accepted_candidate:
+                                    accepted_centers.append((center_lat_idx, center_lon_idx))
+                                    basin_stats[basin_name]["accepted_candidates"] += 1
+                                    geos_vmax_by_basin[basin_name].append(float(vmax_kt))
+                                else:
+                                    basin_stats[basin_name]["rejected_candidates_written"] += int(args.write_all_centers)
+                                if accepted_candidate or args.write_all_centers:
+                                    basin_stats[basin_name]["candidate_rows_written"] += 1
+                                    write_candidate(candidate_writer, candidate_row)
 
                         write_progress(
                             progress_writer,
@@ -961,12 +1017,15 @@ def write_thresholds(
         "geos_max_vmax_kt",
         "evaluated_steps",
         "candidate_centers_evaluated",
+        "candidate_rows_written",
         "accepted_candidates",
         "resumed_existing_candidates",
+        "resumed_existing_rejected_candidates",
         "duplicate_resume_candidate",
         "skipped_completed_times",
         "resumed_land_candidates_skipped",
         "rejected_structure",
+        "rejected_candidates_written",
         "rejected_land",
         "duplicate_center",
         "max_centers_reached",
@@ -985,6 +1044,7 @@ def write_thresholds(
         "resume",
         "progress_path",
         "stopped_early",
+        "write_all_centers",
         "ocean_only",
         "ocean_mask_source",
         "ocean_threshold",
@@ -1029,12 +1089,15 @@ def write_thresholds(
                         **stats,
                         "evaluated_steps": basin_stats[basin_name]["evaluated_steps"],
                         "candidate_centers_evaluated": basin_stats[basin_name]["candidate_centers_evaluated"],
+                        "candidate_rows_written": basin_stats[basin_name]["candidate_rows_written"],
                         "accepted_candidates": basin_stats[basin_name]["accepted_candidates"],
                         "resumed_existing_candidates": basin_stats[basin_name]["resumed_existing_candidates"],
+                        "resumed_existing_rejected_candidates": basin_stats[basin_name]["resumed_existing_rejected_candidates"],
                         "duplicate_resume_candidate": basin_stats[basin_name]["duplicate_resume_candidate"],
                         "skipped_completed_times": basin_stats[basin_name]["skipped_completed_times"],
                         "resumed_land_candidates_skipped": basin_stats[basin_name]["resumed_land_candidates_skipped"],
                         "rejected_structure": basin_stats[basin_name]["rejected_structure"],
+                        "rejected_candidates_written": basin_stats[basin_name]["rejected_candidates_written"],
                         "rejected_land": basin_stats[basin_name]["rejected_land"],
                         "duplicate_center": basin_stats[basin_name]["duplicate_center"],
                         "max_centers_reached": basin_stats[basin_name]["max_centers_reached"],
@@ -1053,6 +1116,7 @@ def write_thresholds(
                         "resume": int(args.resume),
                         "progress_path": str(args._progress_path),
                         "stopped_early": int(getattr(args, "_stopped_early", False)),
+                        "write_all_centers": int(args.write_all_centers),
                         "ocean_only": int(args.ocean_only),
                         "ocean_mask_source": args.ocean_mask_source,
                         "ocean_threshold": args.ocean_threshold,
@@ -1124,6 +1188,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=200,
         help="Number of lowest-SLP basin grid points inspected for local minima at each basin/time.",
+    )
+    parser.add_argument(
+        "--write-all-centers",
+        action="store_true",
+        help=(
+            "Write every evaluated oceanic local SLP minimum with gate-pass flags. "
+            "Threshold summaries still use only accepted_candidate=1 rows."
+        ),
     )
     parser.add_argument("--ignore-vorticity", action="store_true")
     add_ocean_only_args(parser)
@@ -1201,6 +1273,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Progress CSV will be written to: {progress_path}", flush=True)
     print(f"Resume mode: {int(args.resume)}", flush=True)
     print(f"Stop after hours: {args.stop_after_hours}", flush=True)
+    print(f"Write all evaluated centers: {int(args.write_all_centers)}", flush=True)
     print(f"Ocean-only: {int(args.ocean_only)} source={args.ocean_mask_source} threshold={args.ocean_threshold}", flush=True)
 
     geos_vmax_by_basin: dict[str, list[float]] = {basin_name: [] for basin_name in BASINS}
