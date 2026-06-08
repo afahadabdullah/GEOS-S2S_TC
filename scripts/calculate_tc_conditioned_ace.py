@@ -69,6 +69,11 @@ DEFAULT_THRESHOLD_COLUMN = "geos_threshold_kt"
 MPS_TO_KNOTS = 1.94384
 EARTH_RADIUS_M = 6_371_000.0
 TS_THRESHOLD_KNOTS_DEFAULT = 17.0
+DEFAULT_STRUCTURE_GATE = "current"
+DEFAULT_CENTER_AGGREGATION = "single_slp"
+DEFAULT_MAX_CENTERS_PER_BASIN = 0
+DEFAULT_CENTER_SEARCH_POINTS = 200
+DEFAULT_LOCAL_MIN_RADIUS_DEG = 2.0
 
 # Variable candidates for ATM structure gating
 SLP_CANDIDATES = ("SLP", "slp", "PSL", "SeaLevelPressure")
@@ -128,6 +133,24 @@ class SFCMatch:
     time_index: int
 
 
+@dataclass
+class ACECandidate:
+    center_lat_idx: int
+    center_lon_idx: int
+    center_lat: float
+    center_lon: float
+    slp_hpa: float
+    slp_anom_hpa: float
+    warm_core_anom_k: float
+    qv850_anom_gpkg: float
+    vort850_s1: float
+    vmax_kt: float
+    passes_slp_anom: bool
+    passes_warm_core: bool
+    passes_qv: bool
+    passes_vorticity: bool
+
+
 def parse_list(value: str | None) -> list[str]:
     if not value:
         return []
@@ -141,6 +164,51 @@ def parse_float(value: str | None) -> float:
         return float(value)
     except ValueError:
         return float("nan")
+
+
+def normalize_lon(lon: float) -> float:
+    return ((lon + 180.0) % 360.0) - 180.0
+
+
+def split_ace_method(method: str) -> tuple[str, str]:
+    if "+" in method:
+        gate, aggregation = method.split("+", 1)
+        return gate.strip(), aggregation.strip()
+    return DEFAULT_STRUCTURE_GATE, method.strip()
+
+
+def ace_method_signature_from_values(
+    structure_gate: str,
+    center_aggregation: str,
+    max_centers_per_basin: int,
+    center_search_points: int,
+    local_min_radius_deg: float,
+    environment_radius_deg: float,
+    inner_core_radius_deg: float,
+    wind_search_radius_deg: float,
+) -> str:
+    return (
+        f"gate={structure_gate};aggregation={center_aggregation};"
+        f"max_centers={int(max_centers_per_basin)};"
+        f"center_search={int(center_search_points)};"
+        f"local_min_radius={float(local_min_radius_deg):.4f};"
+        f"env_radius={float(environment_radius_deg):.4f};"
+        f"inner_radius={float(inner_core_radius_deg):.4f};"
+        f"wind_radius={float(wind_search_radius_deg):.4f}"
+    )
+
+
+def default_ace_method_signature() -> str:
+    return ace_method_signature_from_values(
+        DEFAULT_STRUCTURE_GATE,
+        DEFAULT_CENTER_AGGREGATION,
+        DEFAULT_MAX_CENTERS_PER_BASIN,
+        DEFAULT_CENTER_SEARCH_POINTS,
+        DEFAULT_LOCAL_MIN_RADIUS_DEG,
+        5.0,
+        1.5,
+        3.0,
+    )
 
 
 def basin_threshold_signature(thresholds: dict[str, float]) -> str:
@@ -213,6 +281,17 @@ def cache_threshold_signature(cache_path: Path) -> str | None:
     try:
         with netCDF4.Dataset(cache_path, "r") as ds:
             value = getattr(ds, "ts_threshold_signature", None)
+            return str(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def cache_ace_method_signature(cache_path: Path) -> str | None:
+    if not cache_path.exists():
+        return None
+    try:
+        with netCDF4.Dataset(cache_path, "r") as ds:
+            value = getattr(ds, "ace_method_signature", None)
             return str(value) if value is not None else None
     except Exception:
         return None
@@ -434,6 +513,159 @@ def basin_candidate_center(field: np.ndarray, latitudes: np.ndarray, longitudes:
     return best_indices[0], best_indices[1], best_value
 
 
+def lon_lat_distance_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    dlat = lat1 - lat2
+    dlon = abs(normalize_lon(lon1 - lon2))
+    mean_lat = math.radians(0.5 * (lat1 + lat2))
+    return math.sqrt(dlat * dlat + (dlon * math.cos(mean_lat)) ** 2)
+
+
+def candidate_distance_deg(candidate_a: ACECandidate, candidate_b: ACECandidate) -> float:
+    return lon_lat_distance_deg(
+        candidate_a.center_lat,
+        candidate_a.center_lon,
+        candidate_b.center_lat,
+        candidate_b.center_lon,
+    )
+
+
+def is_local_minimum(field: np.ndarray, lat_idx: int, lon_idx: int, lat_radius: int, lon_radius: int) -> bool:
+    value = float(field[lat_idx, lon_idx])
+    if not np.isfinite(value):
+        return False
+    nlat, nlon = field.shape
+    lat_lo = max(0, lat_idx - lat_radius)
+    lat_hi = min(nlat, lat_idx + lat_radius + 1)
+    lon_offsets = np.arange(-lon_radius, lon_radius + 1)
+    lon_indices = (lon_idx + lon_offsets) % nlon
+    patch = field[np.ix_(np.arange(lat_lo, lat_hi), lon_indices)]
+    if not np.isfinite(patch).any():
+        return False
+    return value <= float(np.nanmin(patch)) + 1.0e-8 and value < float(np.nanmean(patch)) - 1.0e-8
+
+
+def basin_low_slp_local_minima(
+    field: np.ndarray,
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+    basin_def: dict[str, object],
+    max_search_points: int,
+    local_min_lat_radius: int,
+    local_min_lon_radius: int,
+) -> list[tuple[int, int, float]]:
+    lat_min, lat_max = basin_def["lat_range"]
+    lat_idx = np.where((latitudes >= lat_min) & (latitudes <= lat_max))[0]
+    if len(lat_idx) == 0:
+        raise ValueError("No latitude points found for basin")
+
+    point_lat_indices: list[np.ndarray] = []
+    point_lon_indices: list[np.ndarray] = []
+    point_values: list[np.ndarray] = []
+    for lon_idx in basin_lon_sets(longitudes, basin_def):
+        if len(lon_idx) == 0:
+            continue
+        patch = field[np.ix_(lat_idx, lon_idx)]
+        finite_mask = np.isfinite(patch)
+        if not finite_mask.any():
+            continue
+        patch_i, patch_j = np.where(finite_mask)
+        point_lat_indices.append(lat_idx[patch_i])
+        point_lon_indices.append(lon_idx[patch_j])
+        point_values.append(patch[patch_i, patch_j])
+
+    if not point_values:
+        raise ValueError("No finite basin candidate center found")
+
+    candidate_lats = np.concatenate(point_lat_indices)
+    candidate_lons = np.concatenate(point_lon_indices)
+    candidate_values = np.concatenate(point_values).astype("float64")
+    search_count = min(candidate_values.size, max(1, int(max_search_points)))
+    if search_count < candidate_values.size:
+        lowest_indices = np.argpartition(candidate_values, search_count - 1)[:search_count]
+    else:
+        lowest_indices = np.arange(candidate_values.size)
+    lowest_indices = lowest_indices[np.argsort(candidate_values[lowest_indices])]
+
+    centers: list[tuple[int, int, float]] = []
+    for index in lowest_indices:
+        lat_i = int(candidate_lats[index])
+        lon_i = int(candidate_lons[index])
+        if is_local_minimum(field, lat_i, lon_i, local_min_lat_radius, local_min_lon_radius):
+            centers.append((lat_i, lon_i, float(candidate_values[index])))
+
+    if centers:
+        return centers
+
+    center_lat_idx, center_lon_idx, center_slp = basin_candidate_center(field, latitudes, longitudes, basin_def)
+    return [(center_lat_idx, center_lon_idx, center_slp)]
+
+
+def structure_gate_passes(candidate: ACECandidate, gate: str) -> bool:
+    if gate in {"current", "accepted", "structure", "slp_warm_qv_vort", "with_vort"}:
+        return bool(
+            candidate.passes_slp_anom
+            and candidate.passes_warm_core
+            and candidate.passes_qv
+            and candidate.passes_vorticity
+        )
+    if gate == "slp_only":
+        return bool(candidate.passes_slp_anom)
+    if gate == "slp_warm":
+        return bool(candidate.passes_slp_anom and candidate.passes_warm_core)
+    if gate == "slp_qv":
+        return bool(candidate.passes_slp_anom and candidate.passes_qv)
+    if gate in {"slp_warm_qv", "slp_warm_qv_no_vort", "no_vort"}:
+        return bool(candidate.passes_slp_anom and candidate.passes_warm_core and candidate.passes_qv)
+    raise ValueError(f"Unknown structure gate: {gate}")
+
+
+def structure_gate_uses_vorticity(gate: str) -> bool:
+    return gate in {"current", "accepted", "structure", "slp_warm_qv_vort", "with_vort"}
+
+
+def select_ace_candidates(
+    candidates: list[ACECandidate],
+    structure_gate: str,
+    center_aggregation: str,
+    max_centers_per_basin: int,
+) -> list[ACECandidate]:
+    gated = [candidate for candidate in candidates if structure_gate_passes(candidate, structure_gate)]
+    if not gated:
+        return []
+
+    if center_aggregation == "single_slp":
+        finite_slp = [candidate for candidate in gated if np.isfinite(candidate.slp_hpa)]
+        selected = min(finite_slp, key=lambda item: item.slp_hpa) if finite_slp else max(gated, key=lambda item: item.vmax_kt)
+        return [selected]
+
+    if center_aggregation == "single_vmax":
+        return [max(gated, key=lambda item: item.vmax_kt)]
+
+    sorted_by_vmax = sorted(gated, key=lambda item: item.vmax_kt, reverse=True)
+    max_centers = int(max_centers_per_basin)
+
+    if center_aggregation == "sum_all":
+        return sorted_by_vmax[:max_centers] if max_centers > 0 else sorted_by_vmax
+
+    top_match = re.match(r"^top(\d+)_vmax$", center_aggregation)
+    if top_match:
+        top_n = max(1, int(top_match.group(1)))
+        return sorted_by_vmax[:top_n]
+
+    sep_match = re.match(r"^sep([0-9.]+)_vmax$", center_aggregation)
+    if sep_match:
+        separation = float(sep_match.group(1))
+        kept: list[ACECandidate] = []
+        for candidate in sorted_by_vmax:
+            if max_centers > 0 and len(kept) >= max_centers:
+                break
+            if all(candidate_distance_deg(candidate, existing) >= separation for existing in kept):
+                kept.append(candidate)
+        return kept
+
+    raise ValueError(f"Unknown center aggregation: {center_aggregation}")
+
+
 def relative_vorticity(u_field: np.ndarray, v_field: np.ndarray, latitudes: np.ndarray, longitudes: np.ndarray, lat_idx: int, lon_idx: int) -> float:
     if lat_idx <= 0 or lat_idx >= len(latitudes) - 1:
         return float("nan")
@@ -618,6 +850,12 @@ def write_cache(
     basin_thresholds: dict[str, float] | None = None,
     threshold_mode: str = "fixed",
     threshold_source: str = "",
+    ace_method_signature: str = "",
+    structure_gate: str = DEFAULT_STRUCTURE_GATE,
+    center_aggregation: str = DEFAULT_CENTER_AGGREGATION,
+    max_centers_per_basin: int = DEFAULT_MAX_CENTERS_PER_BASIN,
+    center_search_points: int = DEFAULT_CENTER_SEARCH_POINTS,
+    local_min_radius_deg: float = DEFAULT_LOCAL_MIN_RADIUS_DEG,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -681,7 +919,7 @@ def write_cache(
             basin_key = safe_name(basin_name)
             for field_name, values in basin_data.items():
                 array = np.asarray(values)
-                dtype = "i1" if array.dtype.kind in {"b", "i"} and field_name == "tc_flag" else "f4"
+                dtype = "i2" if array.dtype.kind in {"b", "i"} and field_name in {"tc_flag", "selected_candidate_count"} else "f4"
                 var = ds.createVariable(f"{field_name}_{basin_key}", dtype, ("time",), zlib=True, complevel=4)
                 var[:] = array
                 if field_name == "cumulative_ace":
@@ -720,9 +958,16 @@ def write_cache(
             ds.ts_threshold_signature = basin_threshold_signature(basin_thresholds)
             for basin_name, threshold in basin_thresholds.items():
                 ds.setncattr(f"ts_threshold_kt_{safe_name(basin_name)}", float(threshold))
+        ds.ace_method_signature = ace_method_signature
+        ds.structure_gate = structure_gate
+        ds.center_aggregation = center_aggregation
+        ds.max_centers_per_basin = int(max_centers_per_basin)
+        ds.center_search_points = int(center_search_points)
+        ds.local_min_radius_deg = float(local_min_radius_deg)
         ds.comment = (
             "Unified ACE proxy using SFC wind intensity gated by ATM structure: "
-            "SLP minimum, warm-core anomaly, low-level moisture anomaly, and optional 850-hPa vorticity sign."
+            "candidate SLP minima, selectable SLP/warm-core/QV/vorticity gates, "
+            "and selectable single- or multi-center aggregation."
         )
 
 
@@ -756,6 +1001,7 @@ def read_cache(cache_path: Path) -> tuple[str, str, np.ndarray, np.ndarray, list
                 "step_ace",
                 "vmax_kt",
                 "tc_flag",
+                "selected_candidate_count",
                 "center_lat",
                 "center_lon",
                 "slp_hpa",
@@ -810,6 +1056,9 @@ def write_member_summary_csv(
     basin_thresholds: dict[str, float],
     threshold_mode: str,
     threshold_source: str,
+    structure_gate: str = DEFAULT_STRUCTURE_GATE,
+    center_aggregation: str = DEFAULT_CENTER_AGGREGATION,
+    ace_method_signature: str = "",
 ) -> None:
     """Write compact member-level ACE totals for quick spread/diagnostic plots."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -823,10 +1072,14 @@ def write_member_summary_csv(
         "valid_time_start",
         "valid_time_end",
         "threshold_kt",
+        "ace_method",
+        "structure_gate",
+        "center_aggregation",
         "max_vmax_kt",
         "mean_vmax_kt",
         "threshold_mode",
         "threshold_source",
+        "ace_method_signature",
         "cache_file",
     ]
     rows: list[dict[str, object]] = []
@@ -854,10 +1107,14 @@ def write_member_summary_csv(
                     "valid_time_start": valid_time_start,
                     "valid_time_end": valid_time_end,
                     "threshold_kt": basin_thresholds.get(basin_name, finite_last(basin_diag.get("ts_threshold_kt", []))),
+                    "ace_method": f"{structure_gate}+{center_aggregation}",
+                    "structure_gate": structure_gate,
+                    "center_aggregation": center_aggregation,
                     "max_vmax_kt": finite_max(vmax_values),
                     "mean_vmax_kt": finite_mean(vmax_values),
                     "threshold_mode": threshold_mode,
                     "threshold_source": threshold_source,
+                    "ace_method_signature": ace_method_signature,
                     "cache_file": cache_file,
                 }
             )
@@ -879,10 +1136,14 @@ def write_member_summary_csv(
                 "valid_time_start": valid_time_start,
                 "valid_time_end": valid_time_end,
                 "threshold_kt": float("nan"),
+                "ace_method": f"{structure_gate}+{center_aggregation}",
+                "structure_gate": structure_gate,
+                "center_aggregation": center_aggregation,
                 "max_vmax_kt": finite_max(all_vmax),
                 "mean_vmax_kt": finite_mean(all_vmax),
                 "threshold_mode": threshold_mode,
                 "threshold_source": threshold_source,
+                "ace_method_signature": ace_method_signature,
                 "cache_file": cache_file,
             }
         )
@@ -960,10 +1221,18 @@ def cache_matches_threshold(
     threshold_signature: str,
     threshold_mode: str,
     ts_threshold: float,
+    ace_method_signature: str,
 ) -> bool:
     if not cache_path.is_file():
         return False
     cache_signature = cache_threshold_signature(cache_path)
+    method_signature = cache_ace_method_signature(cache_path)
+    method_matches = (
+        method_signature == ace_method_signature
+        or (method_signature is None and ace_method_signature == default_ace_method_signature())
+    )
+    if not method_matches:
+        return False
     if cache_signature == threshold_signature:
         return True
     return cache_signature is None and threshold_mode == "fixed" and ts_threshold == TS_THRESHOLD_KNOTS_DEFAULT
@@ -1383,6 +1652,48 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Radius around the candidate center used to search for max SFC wind and accumulate spatial ACE",
     )
     parser.add_argument(
+        "--ace-method",
+        default="",
+        help=(
+            "Optional combined method name like slp_qv+sep5_vmax. "
+            "If set, it overrides --structure-gate and --center-aggregation."
+        ),
+    )
+    parser.add_argument(
+        "--structure-gate",
+        default=DEFAULT_STRUCTURE_GATE,
+        help=(
+            "Candidate structure gate. Supported: current, slp_only, slp_warm, slp_qv, "
+            "slp_warm_qv, slp_warm_qv_vort. Default reproduces the original full gate."
+        ),
+    )
+    parser.add_argument(
+        "--center-aggregation",
+        default=DEFAULT_CENTER_AGGREGATION,
+        help=(
+            "How accepted centers are aggregated per basin/time: single_slp, single_vmax, "
+            "sum_all, topN_vmax, or sepX_vmax (examples: top3_vmax, sep5_vmax, sep8_vmax)."
+        ),
+    )
+    parser.add_argument(
+        "--max-centers-per-basin",
+        type=int,
+        default=DEFAULT_MAX_CENTERS_PER_BASIN,
+        help="Optional cap for multi-center aggregation. Use 0 for unlimited (default).",
+    )
+    parser.add_argument(
+        "--center-search-points",
+        type=int,
+        default=DEFAULT_CENTER_SEARCH_POINTS,
+        help="Number of lowest-SLP basin grid points to scan for local minima in multi-center modes.",
+    )
+    parser.add_argument(
+        "--local-min-radius-deg",
+        type=float,
+        default=DEFAULT_LOCAL_MIN_RADIUS_DEG,
+        help="Radius used to identify distinct local SLP minima for multi-center modes.",
+    )
+    parser.add_argument(
         "--ts-threshold",
         type=float,
         default=TS_THRESHOLD_KNOTS_DEFAULT,
@@ -1440,16 +1751,51 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.ace_method:
+        args.structure_gate, args.center_aggregation = split_ace_method(args.ace_method)
+    args.structure_gate = args.structure_gate.strip()
+    args.center_aggregation = args.center_aggregation.strip()
     if args.stop_after_hours < 0.0:
         print("ERROR: --stop-after-hours must be >= 0", file=sys.stderr)
         return 1
     if args.progress_interval_percent <= 0.0:
         print("ERROR: --progress-interval-percent must be > 0", file=sys.stderr)
         return 1
+    if args.max_centers_per_basin < 0:
+        print("ERROR: --max-centers-per-basin must be >= 0", file=sys.stderr)
+        return 1
+    if args.center_search_points <= 0:
+        print("ERROR: --center-search-points must be > 0", file=sys.stderr)
+        return 1
+    if args.local_min_radius_deg <= 0.0:
+        print("ERROR: --local-min-radius-deg must be > 0", file=sys.stderr)
+        return 1
+    valid_gates = {
+        "current",
+        "accepted",
+        "structure",
+        "slp_only",
+        "slp_warm",
+        "slp_qv",
+        "slp_warm_qv",
+        "slp_warm_qv_no_vort",
+        "no_vort",
+        "slp_warm_qv_vort",
+        "with_vort",
+    }
+    if args.structure_gate not in valid_gates:
+        print(f"ERROR: unknown --structure-gate {args.structure_gate}", file=sys.stderr)
+        return 1
+    if args.center_aggregation not in {"single_slp", "single_vmax", "sum_all"}:
+        if not re.match(r"^top\d+_vmax$", args.center_aggregation) and not re.match(r"^sep[0-9.]+_vmax$", args.center_aggregation):
+            print(f"ERROR: unknown --center-aggregation {args.center_aggregation}", file=sys.stderr)
+            return 1
     args._start_monotonic = time.monotonic()
     args.plot_individual = False
     plot_dir = Path(args.plot_dir)
-    threshold_csv = Path(args.geos_thresholds) if args.geos_thresholds else None
+    threshold_csv = None
+    if args.geos_thresholds and args.geos_thresholds.lower() != "none":
+        threshold_csv = Path(args.geos_thresholds)
     basin_thresholds, threshold_mode, threshold_source = load_basin_thresholds(
         threshold_csv,
         fallback_threshold=args.ts_threshold,
@@ -1458,6 +1804,17 @@ def main(argv: list[str] | None = None) -> int:
         threshold_column=args.threshold_column,
     )
     threshold_signature = basin_threshold_signature(basin_thresholds)
+    ace_method_signature = ace_method_signature_from_values(
+        args.structure_gate,
+        args.center_aggregation,
+        args.max_centers_per_basin,
+        args.center_search_points,
+        args.local_min_radius_deg,
+        args.environment_radius_deg,
+        args.inner_core_radius_deg,
+        args.wind_search_radius_deg,
+    )
+    needs_vorticity = structure_gate_uses_vorticity(args.structure_gate)
     
     if args.plot_only_cache:
         init_date, ens, latitudes, longitudes, times, local_ace, diagnostics, uses_vorticity, local_ace_monthly = read_cache(Path(args.plot_only_cache))
@@ -1518,6 +1875,9 @@ def main(argv: list[str] | None = None) -> int:
     print("GEOS S2S3 UNIFIED TC-CONDITIONED ACE DIAGNOSTICS")
     print(f"Initialization: {args.init_date}")
     print(f"Target Ensembles: {', '.join(ens_list)}")
+    print(f"ACE Method: {args.structure_gate}+{args.center_aggregation}")
+    print(f"ACE Method Signature: {ace_method_signature}")
+    print(f"ACE Method Uses Vorticity: {'yes' if needs_vorticity else 'no'}")
     print_thresholds(basin_thresholds, threshold_mode, threshold_source)
     print("=" * 80)
     existing_matching_caches = sum(
@@ -1526,6 +1886,7 @@ def main(argv: list[str] | None = None) -> int:
             threshold_signature,
             threshold_mode,
             args.ts_threshold,
+            ace_method_signature,
         )
         for ens_member in ens_list
     )
@@ -1552,6 +1913,7 @@ def main(argv: list[str] | None = None) -> int:
                 threshold_signature,
                 threshold_mode,
                 args.ts_threshold,
+                ace_method_signature,
             )
             if not cache_matches:
                 print(f"[Cache] Existing cache threshold signature differs for '{ens_member}'; recomputing.")
@@ -1635,6 +1997,8 @@ def main(argv: list[str] | None = None) -> int:
             lon_core_radius = index_radius(longitudes, args.inner_core_radius_deg)
             lat_wind_radius = index_radius(latitudes, args.wind_search_radius_deg)
             lon_wind_radius = index_radius(longitudes, args.wind_search_radius_deg)
+            lat_local_min_radius = index_radius(latitudes, args.local_min_radius_deg)
+            lon_local_min_radius = index_radius(longitudes, args.local_min_radius_deg)
 
             # Initialize 2D spatial local ACE field
             nlat_g, nlon_g = len(latitudes), len(longitudes)
@@ -1650,6 +2014,7 @@ def main(argv: list[str] | None = None) -> int:
                     "step_ace": [],
                     "vmax_kt": [],
                     "tc_flag": [],
+                    "selected_candidate_count": [],
                     "center_lat": [],
                     "center_lon": [],
                     "slp_hpa": [],
@@ -1731,7 +2096,7 @@ def main(argv: list[str] | None = None) -> int:
                         warm_core_field = 0.5 * (t500 + t200) - t850
                         u850 = None
                         v850 = None
-                        if u_name is not None and v_name is not None:
+                        if needs_vorticity and u_name is not None and v_name is not None:
                             u850 = read_2d_field(ds.variables[u_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[850.0])
                             v850 = read_2d_field(ds.variables[v_name], time_index=time_index, level_dim=level_dim, level_index=level_indices[850.0])
                             uses_vorticity = True
@@ -1746,6 +2111,7 @@ def main(argv: list[str] | None = None) -> int:
                                 basin_diag["step_ace"].append(0.0)
                                 basin_diag["vmax_kt"].append(float("nan"))
                                 basin_diag["tc_flag"].append(0)
+                                basin_diag["selected_candidate_count"].append(0)
                                 basin_diag["center_lat"].append(float("nan"))
                                 basin_diag["center_lon"].append(float("nan"))
                                 basin_diag["slp_hpa"].append(float("nan"))
@@ -1758,10 +2124,18 @@ def main(argv: list[str] | None = None) -> int:
 
                             # Robust candidate evaluation with exception handling to prevent crashes
                             try:
-                                center_lat_idx, center_lon_idx, center_slp = basin_candidate_center(slp_hpa, latitudes, longitudes, basin_def)
-                                center_lat = float(latitudes[center_lat_idx])
-                                # Map saved center longitude to [-180, 180]
-                                center_lon = float((longitudes[center_lon_idx] + 180) % 360 - 180)
+                                if args.center_aggregation == "single_slp":
+                                    candidate_centers = [basin_candidate_center(slp_hpa, latitudes, longitudes, basin_def)]
+                                else:
+                                    candidate_centers = basin_low_slp_local_minima(
+                                        slp_hpa,
+                                        latitudes,
+                                        longitudes,
+                                        basin_def,
+                                        args.center_search_points,
+                                        lat_local_min_radius,
+                                        lon_local_min_radius,
+                                    )
                             except ValueError:
                                 # Safely ignore and fill step with NaNs
                                 basin_diag = diagnostics[basin_name]
@@ -1769,6 +2143,7 @@ def main(argv: list[str] | None = None) -> int:
                                 basin_diag["step_ace"].append(0.0)
                                 basin_diag["vmax_kt"].append(float("nan"))
                                 basin_diag["tc_flag"].append(0)
+                                basin_diag["selected_candidate_count"].append(0)
                                 basin_diag["center_lat"].append(float("nan"))
                                 basin_diag["center_lon"].append(float("nan"))
                                 basin_diag["slp_hpa"].append(float("nan"))
@@ -1779,92 +2154,53 @@ def main(argv: list[str] | None = None) -> int:
                                 basin_diag["ts_threshold_kt"].append(basin_ts_threshold)
                                 continue
 
-                            slp_env = annulus_mean(
-                                slp_hpa,
-                                center_lat_idx,
-                                center_lon_idx,
-                                lat_env_radius,
-                                lon_env_radius,
-                                lat_core_radius,
-                                lon_core_radius,
-                            )
-                            warm_env = annulus_mean(
-                                warm_core_field,
-                                center_lat_idx,
-                                center_lon_idx,
-                                lat_env_radius,
-                                lon_env_radius,
-                                lat_core_radius,
-                                lon_core_radius,
-                            )
-                            qv_env = annulus_mean(
-                                qv850,
-                                center_lat_idx,
-                                center_lon_idx,
-                                lat_env_radius,
-                                lon_env_radius,
-                                lat_core_radius,
-                                lon_core_radius,
-                            )
+                            candidates: list[ACECandidate] = []
+                            for center_lat_idx, center_lon_idx, center_slp in candidate_centers:
+                                center_lat = float(latitudes[center_lat_idx])
+                                center_lon = normalize_lon(float(longitudes[center_lon_idx]))
 
-                            slp_anom = center_slp - slp_env
-                            warm_anom = float(warm_core_field[center_lat_idx, center_lon_idx] - warm_env)
-                            qv_anom = float(qv850[center_lat_idx, center_lon_idx] - qv_env)
-
-                            criteria = [
-                                slp_anom < 0.0,
-                                warm_anom > 0.0,
-                                qv_anom > 0.0,
-                            ]
-
-                            vort850 = float("nan")
-                            if u850 is not None and v850 is not None:
-                                vort850 = relative_vorticity(u850, v850, latitudes, longitudes, center_lat_idx, center_lon_idx)
-                                if np.isfinite(vort850):
-                                    criteria.append(vort850 > 0.0 if center_lat >= 0.0 else vort850 < 0.0)
-
-                            tc_flag = int(all(criteria))
-                            
-                            vmax_kt = float("nan")
-                            step_ace = 0.0
-                            if tc_flag:
-                                # Accumulate grid-point winds into spatial local_ace field near approved storm
-                                vmax_kt = accumulate_storm_ace(
-                                    local_ace=local_ace,
-                                    sfc_ws_kt=sfc_ws_kt,
-                                    latitudes=latitudes,
-                                    longitudes=longitudes,
-                                    center_lat_idx=center_lat_idx,
-                                    center_lon_idx=center_lon_idx,
-                                    lat_radius=lat_wind_radius,
-                                    lon_radius=lon_wind_radius,
-                                    search_radius_deg=args.wind_search_radius_deg,
-                                    ts_threshold_knots=basin_ts_threshold,
-                                    scale_step=scale_step,
+                                slp_env = annulus_mean(
+                                    slp_hpa,
+                                    center_lat_idx,
+                                    center_lon_idx,
+                                    lat_env_radius,
+                                    lon_env_radius,
+                                    lat_core_radius,
+                                    lon_core_radius,
                                 )
-                                
-                                # Also accumulate into monthly field
-                                current_month = valid_time.strftime("%m")
-                                if current_month in local_ace_monthly:
-                                    _ = accumulate_storm_ace(
-                                        local_ace=local_ace_monthly[current_month],
-                                        sfc_ws_kt=sfc_ws_kt,
-                                        latitudes=latitudes,
-                                        longitudes=longitudes,
-                                        center_lat_idx=center_lat_idx,
-                                        center_lon_idx=center_lon_idx,
-                                        lat_radius=lat_wind_radius,
-                                        lon_radius=lon_wind_radius,
-                                        search_radius_deg=args.wind_search_radius_deg,
-                                        ts_threshold_knots=basin_ts_threshold,
-                                        scale_step=scale_step,
-                                    )
-                                
-                                # Increment integrated temporal curves using vmax within storm radius
-                                if np.isfinite(vmax_kt) and vmax_kt >= basin_ts_threshold:
-                                    step_ace = float(vmax_kt**2 * scale_step)
-                            else:
-                                # Evaluated peak wind for metadata diagnostics, even if rejected by structure gate
+                                warm_env = annulus_mean(
+                                    warm_core_field,
+                                    center_lat_idx,
+                                    center_lon_idx,
+                                    lat_env_radius,
+                                    lon_env_radius,
+                                    lat_core_radius,
+                                    lon_core_radius,
+                                )
+                                qv_env = annulus_mean(
+                                    qv850,
+                                    center_lat_idx,
+                                    center_lon_idx,
+                                    lat_env_radius,
+                                    lon_env_radius,
+                                    lat_core_radius,
+                                    lon_core_radius,
+                                )
+
+                                slp_anom = float(center_slp - slp_env)
+                                warm_anom = float(warm_core_field[center_lat_idx, center_lon_idx] - warm_env)
+                                qv_anom = float(qv850[center_lat_idx, center_lon_idx] - qv_env)
+                                passes_slp_anom = slp_anom < 0.0
+                                passes_warm_core = warm_anom > 0.0
+                                passes_qv = qv_anom > 0.0
+
+                                vort850 = float("nan")
+                                passes_vorticity = True
+                                if u850 is not None and v850 is not None:
+                                    vort850 = relative_vorticity(u850, v850, latitudes, longitudes, center_lat_idx, center_lon_idx)
+                                    if np.isfinite(vort850):
+                                        passes_vorticity = bool(vort850 > 0.0 if center_lat >= 0.0 else vort850 < 0.0)
+
                                 raw_vmax, _, _ = max_near_center(
                                     sfc_ws_kt,
                                     center_lat_idx,
@@ -1872,7 +2208,101 @@ def main(argv: list[str] | None = None) -> int:
                                     lat_wind_radius,
                                     lon_wind_radius,
                                 )
-                                vmax_kt = float(raw_vmax)
+                                if not np.isfinite(raw_vmax):
+                                    continue
+
+                                candidates.append(
+                                    ACECandidate(
+                                        center_lat_idx=int(center_lat_idx),
+                                        center_lon_idx=int(center_lon_idx),
+                                        center_lat=center_lat,
+                                        center_lon=center_lon,
+                                        slp_hpa=float(center_slp),
+                                        slp_anom_hpa=slp_anom,
+                                        warm_core_anom_k=warm_anom,
+                                        qv850_anom_gpkg=qv_anom,
+                                        vort850_s1=float(vort850),
+                                        vmax_kt=float(raw_vmax),
+                                        passes_slp_anom=passes_slp_anom,
+                                        passes_warm_core=passes_warm_core,
+                                        passes_qv=passes_qv,
+                                        passes_vorticity=passes_vorticity,
+                                    )
+                                )
+
+                            selected_candidates = select_ace_candidates(
+                                candidates,
+                                args.structure_gate,
+                                args.center_aggregation,
+                                args.max_centers_per_basin,
+                            )
+
+                            step_ace = 0.0
+                            current_month = valid_time.strftime("%m")
+                            for selected in selected_candidates:
+                                selected_vmax = accumulate_storm_ace(
+                                    local_ace=local_ace,
+                                    sfc_ws_kt=sfc_ws_kt,
+                                    latitudes=latitudes,
+                                    longitudes=longitudes,
+                                    center_lat_idx=selected.center_lat_idx,
+                                    center_lon_idx=selected.center_lon_idx,
+                                    lat_radius=lat_wind_radius,
+                                    lon_radius=lon_wind_radius,
+                                    search_radius_deg=args.wind_search_radius_deg,
+                                    ts_threshold_knots=basin_ts_threshold,
+                                    scale_step=scale_step,
+                                )
+
+                                if current_month in local_ace_monthly:
+                                    _ = accumulate_storm_ace(
+                                        local_ace=local_ace_monthly[current_month],
+                                        sfc_ws_kt=sfc_ws_kt,
+                                        latitudes=latitudes,
+                                        longitudes=longitudes,
+                                        center_lat_idx=selected.center_lat_idx,
+                                        center_lon_idx=selected.center_lon_idx,
+                                        lat_radius=lat_wind_radius,
+                                        lon_radius=lon_wind_radius,
+                                        search_radius_deg=args.wind_search_radius_deg,
+                                        ts_threshold_knots=basin_ts_threshold,
+                                        scale_step=scale_step,
+                                    )
+
+                                if np.isfinite(selected_vmax) and selected_vmax >= basin_ts_threshold:
+                                    step_ace += float(selected_vmax**2 * scale_step)
+                                    selected.vmax_kt = float(selected_vmax)
+
+                            if selected_candidates:
+                                representative = max(selected_candidates, key=lambda item: item.vmax_kt)
+                                tc_flag = 1
+                                selected_count = len(selected_candidates)
+                                vmax_kt = float(max(candidate.vmax_kt for candidate in selected_candidates))
+                            elif candidates:
+                                representative = max(candidates, key=lambda item: item.vmax_kt)
+                                tc_flag = 0
+                                selected_count = 0
+                                vmax_kt = float(representative.vmax_kt)
+                            else:
+                                representative = ACECandidate(
+                                    center_lat_idx=0,
+                                    center_lon_idx=0,
+                                    center_lat=float("nan"),
+                                    center_lon=float("nan"),
+                                    slp_hpa=float("nan"),
+                                    slp_anom_hpa=float("nan"),
+                                    warm_core_anom_k=float("nan"),
+                                    qv850_anom_gpkg=float("nan"),
+                                    vort850_s1=float("nan"),
+                                    vmax_kt=float("nan"),
+                                    passes_slp_anom=False,
+                                    passes_warm_core=False,
+                                    passes_qv=False,
+                                    passes_vorticity=False,
+                                )
+                                tc_flag = 0
+                                selected_count = 0
+                                vmax_kt = float("nan")
 
                             basin_totals[basin_name] += step_ace
 
@@ -1881,13 +2311,14 @@ def main(argv: list[str] | None = None) -> int:
                             basin_diag["step_ace"].append(step_ace)
                             basin_diag["vmax_kt"].append(vmax_kt)
                             basin_diag["tc_flag"].append(tc_flag)
-                            basin_diag["center_lat"].append(center_lat)
-                            basin_diag["center_lon"].append(center_lon)
-                            basin_diag["slp_hpa"].append(float(center_slp))
-                            basin_diag["slp_anom_hpa"].append(float(slp_anom))
-                            basin_diag["warm_core_anom_k"].append(float(warm_anom))
-                            basin_diag["qv850_anom_gpkg"].append(float(qv_anom))
-                            basin_diag["vort850_s1"].append(float(vort850))
+                            basin_diag["selected_candidate_count"].append(selected_count)
+                            basin_diag["center_lat"].append(representative.center_lat)
+                            basin_diag["center_lon"].append(representative.center_lon)
+                            basin_diag["slp_hpa"].append(float(representative.slp_hpa))
+                            basin_diag["slp_anom_hpa"].append(float(representative.slp_anom_hpa))
+                            basin_diag["warm_core_anom_k"].append(float(representative.warm_core_anom_k))
+                            basin_diag["qv850_anom_gpkg"].append(float(representative.qv850_anom_gpkg))
+                            basin_diag["vort850_s1"].append(float(representative.vort850_s1))
                             basin_diag["ts_threshold_kt"].append(basin_ts_threshold)
                 atm_progress.update(idx + 1)
 
@@ -1912,6 +2343,12 @@ def main(argv: list[str] | None = None) -> int:
                 basin_thresholds=basin_thresholds,
                 threshold_mode=threshold_mode,
                 threshold_source=threshold_source,
+                ace_method_signature=ace_method_signature,
+                structure_gate=args.structure_gate,
+                center_aggregation=args.center_aggregation,
+                max_centers_per_basin=args.max_centers_per_basin,
+                center_search_points=args.center_search_points,
+                local_min_radius_deg=args.local_min_radius_deg,
             )
             
             # Load curves to plot
@@ -1972,6 +2409,9 @@ def main(argv: list[str] | None = None) -> int:
                 basin_thresholds=basin_thresholds,
                 threshold_mode=threshold_mode,
                 threshold_source=threshold_source,
+                structure_gate=args.structure_gate,
+                center_aggregation=args.center_aggregation,
+                ace_method_signature=ace_method_signature,
             )
         print("Clean early stop complete. Existing member caches will be reused by the resume job.")
         return 0
@@ -2032,6 +2472,9 @@ def main(argv: list[str] | None = None) -> int:
         basin_thresholds=basin_thresholds,
         threshold_mode=threshold_mode,
         threshold_source=threshold_source,
+        structure_gate=args.structure_gate,
+        center_aggregation=args.center_aggregation,
+        ace_method_signature=ace_method_signature,
     )
     
     ensmean_cache_path = cache_dir / f"tc_conditioned_ace_{args.init_date}_ensmean.nc4"
@@ -2049,6 +2492,12 @@ def main(argv: list[str] | None = None) -> int:
         basin_thresholds=basin_thresholds,
         threshold_mode=threshold_mode,
         threshold_source=threshold_source,
+        ace_method_signature=ace_method_signature,
+        structure_gate=args.structure_gate,
+        center_aggregation=args.center_aggregation,
+        max_centers_per_basin=args.max_centers_per_basin,
+        center_search_points=args.center_search_points,
+        local_min_radius_deg=args.local_min_radius_deg,
     )
     
     # Load cumulative curves to plot
