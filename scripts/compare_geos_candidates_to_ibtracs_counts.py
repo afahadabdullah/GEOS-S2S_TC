@@ -43,10 +43,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from candidate_inventory_defaults import CANONICAL_ALL_CENTERS_CANDIDATES
 from ocean_mask_utils import add_ocean_only_args, build_ocean_checker, row_over_ocean_value
 
 
-DEFAULT_CANDIDATES = "data/calibration/*_candidates.csv"
+DEFAULT_CANDIDATES = CANONICAL_ALL_CENTERS_CANDIDATES
 DEFAULT_IBTRACS = "data/obs/ibtracs/IBTrACS.since1980.v04r01.nc"
 DEFAULT_OUTPUT_DIR = "data/calibration/count_comparison"
 DEFAULT_PLOT_DIR = "plots/geos_ibtracs_count_comparison"

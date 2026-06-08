@@ -32,6 +32,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
+from candidate_inventory_defaults import CANONICAL_ALL_CENTERS_CANDIDATES
 from ocean_mask_utils import add_ocean_only_args, build_ocean_checker, row_over_ocean_value
 
 try:
@@ -83,7 +84,7 @@ BASINS = {
 }
 
 BASIN_ORDER = list(BASINS)
-DEFAULT_CANDIDATES = "data/calibration/*_candidates.csv"
+DEFAULT_CANDIDATES = CANONICAL_ALL_CENTERS_CANDIDATES
 DEFAULT_OBS_PERCENTILES = "data/obs/ibtracs/ibtracs_observed_percentiles.csv"
 DEFAULT_PLOT_DIR = "plots/geos_candidate_diagnostics"
 MONTH_LABELS = {
@@ -136,7 +137,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--candidates",
         nargs="*",
         default=[DEFAULT_CANDIDATES],
-        help="Candidate CSV path(s) or glob(s). Default: data/calibration/*_candidates.csv",
+        help=f"Candidate CSV path(s) or glob(s). Default: {DEFAULT_CANDIDATES}",
     )
     parser.add_argument(
         "--thresholds",

@@ -32,6 +32,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from candidate_inventory_defaults import CANONICAL_ALL_CENTERS_CANDIDATES
 from calculate_tc_conditioned_ace import BASINS
 from ocean_mask_utils import add_ocean_only_args, build_ocean_checker, row_over_ocean_value
 from plot_ace_yearly_timeseries import (
@@ -45,7 +46,7 @@ from plot_ace_yearly_timeseries import (
 )
 
 
-DEFAULT_CANDIDATES = "data/calibration/*_candidates.csv"
+DEFAULT_CANDIDATES = CANONICAL_ALL_CENTERS_CANDIDATES
 DEFAULT_OUTPUT_DIR = "data/analysis/ace_method_test"
 DEFAULT_PLOT_DIR = "plots/ace_method_test"
 DEFAULT_METHODS = (
