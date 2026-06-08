@@ -493,7 +493,13 @@ def rank_methods(summary_rows: list[dict[str, object]]) -> list[dict[str, object
                 "threshold_kt": threshold,
                 "weighted_abs_log_ratio": weighted_abs_log,
                 "weighted_ratio": weighted_ratio,
+                "weighted_required_multiplier": 1.0 / weighted_ratio
+                if weighted_ratio > 0.0 and np.isfinite(weighted_ratio)
+                else float("nan"),
                 "all_basin_ratio": all_ratio,
+                "all_basin_required_multiplier": 1.0 / all_ratio
+                if all_ratio > 0.0 and np.isfinite(all_ratio)
+                else float("nan"),
                 "all_basin_abs_log_ratio": all_abs_log,
                 "score": weighted_abs_log,
             }
@@ -627,7 +633,7 @@ def plot_best_basin_ratios(best_rows: list[dict[str, object]], plot_dir: Path, p
 
 def print_top_methods(ranking_rows: list[dict[str, object]], limit: int = 12) -> None:
     print("\nTop candidate ACE aggregation methods")
-    print(f"{'rank':>4}  {'method':16s} {'T':>6s} {'score':>9s} {'all_ratio':>9s} {'w_ratio':>9s}")
+    print(f"{'rank':>4}  {'method':16s} {'T':>6s} {'score':>9s} {'all_ratio':>9s} {'need_x':>8s} {'w_ratio':>9s}")
     for row in ranking_rows[:limit]:
         print(
             f"{int(row['rank']):4d}  "
@@ -635,8 +641,48 @@ def print_top_methods(ranking_rows: list[dict[str, object]], limit: int = 12) ->
             f"{float(row['threshold_kt']):6.1f} "
             f"{float(row['weighted_abs_log_ratio']):9.3f} "
             f"{float(row['all_basin_ratio']):9.3f} "
+            f"{float(row['all_basin_required_multiplier']):8.2f} "
             f"{float(row['weighted_ratio']):9.3f}"
         )
+
+
+def print_best_by_basin(best_rows: list[dict[str, object]]) -> None:
+    print("\nBest method by basin")
+    print(f"{'basin':20s} {'method':16s} {'T':>6s} {'ratio':>9s} {'need_x':>8s}")
+    for row in best_rows:
+        ratio = float(row["geos_to_ibtracs_ratio"])
+        need_x = 1.0 / ratio if ratio > 0.0 and np.isfinite(ratio) else float("nan")
+        print(
+            f"{str(row['basin_name']):20s} "
+            f"{str(row['method']):16s} "
+            f"{float(row['threshold_kt']):6.1f} "
+            f"{ratio:9.3f} "
+            f"{need_x:8.2f}"
+        )
+
+
+def print_interpretation(ranking_rows: list[dict[str, object]]) -> None:
+    if not ranking_rows:
+        return
+    best = ranking_rows[0]
+    all_ratio = float(best["all_basin_ratio"])
+    need_x = float(best["all_basin_required_multiplier"])
+    print("\nInterpretation")
+    if np.isfinite(all_ratio):
+        print(
+            "Best all-basin method is "
+            f"{best['method']} at T={float(best['threshold_kt']):.1f} kt: "
+            f"GEOS/IBTrACS ACE={all_ratio:.3f}, requiring about {need_x:.2f}x more ACE to match."
+        )
+        if all_ratio < 0.75:
+            print(
+                "This is still far below 1.0, so candidate aggregation and wind threshold alone "
+                "do not explain the ACE deficit in this cached accepted-candidate inventory."
+            )
+            print(
+                "The next experiment should loosen or replace the structural detector, or generate "
+                "a rejected-candidate inventory so SLP/warm-core/QV/vorticity gates can be tested."
+            )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -702,6 +748,8 @@ def main(argv: list[str] | None = None) -> int:
     plot_score_heatmap(ranking_rows, plot_dir, args.prefix, args.dpi)
     plot_best_basin_ratios(best_rows, plot_dir, args.prefix, args.dpi)
     print_top_methods(ranking_rows)
+    print_best_by_basin(best_rows)
+    print_interpretation(ranking_rows)
     return 0
 
 
