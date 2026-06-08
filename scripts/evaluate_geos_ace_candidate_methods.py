@@ -728,14 +728,27 @@ def print_best_by_basin(best_rows: list[dict[str, object]]) -> None:
 def print_interpretation(ranking_rows: list[dict[str, object]]) -> None:
     if not ranking_rows:
         return
-    best = ranking_rows[0]
-    all_ratio = float(best["all_basin_ratio"])
-    need_x = float(best["all_basin_required_multiplier"])
+    best_weighted = ranking_rows[0]
+    finite_all = [
+        row
+        for row in ranking_rows
+        if np.isfinite(float(row.get("all_basin_abs_log_ratio", np.nan)))
+    ]
+    best_all = min(finite_all, key=lambda row: float(row["all_basin_abs_log_ratio"])) if finite_all else best_weighted
+    all_ratio = float(best_all["all_basin_ratio"])
+    need_x = float(best_all["all_basin_required_multiplier"])
     print("\nInterpretation")
+    if np.isfinite(float(best_weighted["weighted_ratio"])):
+        print(
+            "Best basin-weighted method is "
+            f"{best_weighted['method']} at T={float(best_weighted['threshold_kt']):.1f} kt: "
+            f"weighted GEOS/IBTrACS ACE={float(best_weighted['weighted_ratio']):.3f}, "
+            f"all-basin ratio={float(best_weighted['all_basin_ratio']):.3f}."
+        )
     if np.isfinite(all_ratio):
         print(
-            "Best all-basin method is "
-            f"{best['method']} at T={float(best['threshold_kt']):.1f} kt: "
+            "Best all-basin amplitude method is "
+            f"{best_all['method']} at T={float(best_all['threshold_kt']):.1f} kt: "
             f"GEOS/IBTrACS ACE={all_ratio:.3f}, requiring about {need_x:.2f}x more ACE to match."
         )
         if all_ratio < 0.75:
@@ -746,6 +759,11 @@ def print_interpretation(ranking_rows: list[dict[str, object]]) -> None:
             print(
                 "The next experiment should loosen or replace the structural detector, or generate "
                 "a rejected-candidate inventory so SLP/warm-core/QV/vorticity gates can be tested."
+            )
+        elif 0.9 <= all_ratio <= 1.1:
+            print(
+                "All-basin ACE amplitude is close to IBTrACS for this short test. "
+                "Check basin-by-basin stability with more years before promoting the method."
             )
 
 
