@@ -41,6 +41,11 @@ CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data/cache}"
 PLOT_DIR="${PLOT_DIR:-${REPO_ROOT}/plots/ace}"
 ACE_PROGRESS_INIT_DATES_FILE="${ACE_PROGRESS_INIT_DATES_FILE:-${REPO_ROOT}/config/init_dates_late_aug_1991_2024.txt}"
 ACE_PROGRESS_YEARS="${ACE_PROGRESS_YEARS:-1991:2024}"
+RUN_LAGGED_FUSION="${RUN_LAGGED_FUSION:-0}"
+LAGGED_FUSION_YEARS="${LAGGED_FUSION_YEARS:-${ACE_PROGRESS_YEARS}}"
+LAGGED_FUSION_INIT_DATES="${LAGGED_FUSION_INIT_DATES:-0824:0829}"
+LAGGED_FUSION_MONTHS="${LAGGED_FUSION_MONTHS:-09:10}"
+LAGGED_FUSION_PLOT_DIR="${LAGGED_FUSION_PLOT_DIR:-${PLOT_DIR}/lagged}"
 GEOS_THRESHOLDS="${GEOS_THRESHOLDS:-${REPO_ROOT}/data/calibration/count_comparison/geos_ibtracs_count_comparison_19910824_20240829_all_countmatch_count_calibration.csv}"
 TS_THRESHOLD="${TS_THRESHOLD:-17.0}"
 THRESHOLD_COLUMN="${THRESHOLD_COLUMN:-count_match_threshold_kt}"
@@ -264,6 +269,11 @@ submit_resume_job() {
   append_qsub_var "PLOT_DIR" "${PLOT_DIR}"
   append_qsub_var "ACE_PROGRESS_INIT_DATES_FILE" "${ACE_PROGRESS_INIT_DATES_FILE}"
   append_qsub_var "ACE_PROGRESS_YEARS" "${ACE_PROGRESS_YEARS}"
+  append_qsub_var "RUN_LAGGED_FUSION" "${RUN_LAGGED_FUSION}"
+  append_qsub_var "LAGGED_FUSION_YEARS" "${LAGGED_FUSION_YEARS}"
+  append_qsub_var "LAGGED_FUSION_INIT_DATES" "${LAGGED_FUSION_INIT_DATES}"
+  append_qsub_var "LAGGED_FUSION_MONTHS" "${LAGGED_FUSION_MONTHS}"
+  append_qsub_var "LAGGED_FUSION_PLOT_DIR" "${LAGGED_FUSION_PLOT_DIR}"
   append_qsub_var "GEOS_THRESHOLDS" "${GEOS_THRESHOLDS}"
   append_qsub_var "TS_THRESHOLD" "${TS_THRESHOLD}"
   append_qsub_var "THRESHOLD_COLUMN" "${THRESHOLD_COLUMN}"
@@ -364,6 +374,18 @@ print_ace_progress() {
   echo ""
 }
 
+all_selected_init_ensmeans_done() {
+  local missing_count=0
+  local current_init
+  for current_init in "${INIT_DATES[@]}"; do
+    if [[ ! -f "${CACHE_DIR}/tc_conditioned_ace_${current_init}_ensmean.nc4" ]]; then
+      echo "Lagged fusion prerequisite missing: ${CACHE_DIR}/tc_conditioned_ace_${current_init}_ensmean.nc4"
+      missing_count=$((missing_count + 1))
+    fi
+  done
+  (( missing_count == 0 ))
+}
+
 cd "${REPO_ROOT}"
 JOB_START_EPOCH="$(date +%s)"
 
@@ -384,6 +406,11 @@ echo "ENS=${ENS}"
 echo "FORECAST_MONTHS=${FORECAST_MONTHS}"
 echo "ACE_PROGRESS_INIT_DATES_FILE=${ACE_PROGRESS_INIT_DATES_FILE}"
 echo "ACE_PROGRESS_YEARS=${ACE_PROGRESS_YEARS}"
+echo "RUN_LAGGED_FUSION=${RUN_LAGGED_FUSION}"
+echo "LAGGED_FUSION_YEARS=${LAGGED_FUSION_YEARS}"
+echo "LAGGED_FUSION_INIT_DATES=${LAGGED_FUSION_INIT_DATES}"
+echo "LAGGED_FUSION_MONTHS=${LAGGED_FUSION_MONTHS}"
+echo "LAGGED_FUSION_PLOT_DIR=${LAGGED_FUSION_PLOT_DIR}"
 echo "GEOS_THRESHOLDS=${GEOS_THRESHOLDS}"
 echo "TS_THRESHOLD=${TS_THRESHOLD}"
 echo "THRESHOLD_COLUMN=${THRESHOLD_COLUMN}"
@@ -540,5 +567,31 @@ echo "Job finished: $(date)"
 echo "Batch init dates attempted in this job: ${attempted_init_count}/${#INIT_DATES[@]}"
 echo "Final exit status: ${status}"
 print_ace_progress "after batch"
+
+if [[ "${RUN_LAGGED_FUSION}" == "1" ]]; then
+  if (( status == 0 && attempted_init_count == ${#INIT_DATES[@]} )) && all_selected_init_ensmeans_done; then
+    echo ""
+    echo "================================================================================"
+    echo "Running lagged ensemble fusion after completed ACE batch"
+    echo "================================================================================"
+    fusion_cmd=(
+      "${PYTHON_BIN}" -u scripts/fuse_lagged_ensembles.py
+      --cache-dir "${CACHE_DIR}"
+      --plot-dir "${LAGGED_FUSION_PLOT_DIR}"
+      --years "${LAGGED_FUSION_YEARS}"
+      --init-dates "${LAGGED_FUSION_INIT_DATES}"
+      --months "${LAGGED_FUSION_MONTHS}"
+    )
+    echo "Running: ${fusion_cmd[*]}"
+    "${fusion_cmd[@]}"
+    fusion_status=$?
+    echo "Lagged fusion exit status: ${fusion_status}"
+    if (( fusion_status != 0 )); then
+      status="${fusion_status}"
+    fi
+  else
+    echo "Skipping lagged fusion because ACE batch is incomplete or failed: status=${status}, attempted=${attempted_init_count}/${#INIT_DATES[@]}"
+  fi
+fi
 
 exit "${status}"
