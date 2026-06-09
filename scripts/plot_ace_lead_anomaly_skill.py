@@ -386,6 +386,66 @@ def plot_skill(skill: list[dict[str, object]], path: Path, dpi: int) -> None:
     print(f"  -> Saved {path}")
 
 
+def safe_float(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def format_float(value: object, width: int = 8, precision: int = 3) -> str:
+    number = safe_float(value)
+    if not np.isfinite(number):
+        return f"{'nan':>{width}s}"
+    return f"{number:{width}.{precision}f}"
+
+
+def print_skill_summary(skill: list[dict[str, object]]) -> None:
+    if not skill:
+        print("\nNo lead skill metrics available.")
+        return
+
+    lead_sort = lambda value: int(value.replace("lead", "")) if value.replace("lead", "").isdigit() else 99
+    basin_order = ["All Basins"] + BASIN_ORDER
+    rows = sorted(
+        skill,
+        key=lambda row: (
+            lead_sort(str(row.get("lead", ""))),
+            basin_order.index(str(row.get("basin_name", "")))
+            if str(row.get("basin_name", "")) in basin_order
+            else len(basin_order),
+        ),
+    )
+
+    print("\nACE lead anomaly skill metrics")
+    print(
+        f"{'lead':7s} {'mon':>3s} {'basin':20s} {'n':>3s} "
+        f"{'r':>8s} {'rmse':>8s} {'mae':>8s} {'bias':>9s} "
+        f"{'GEOSclim':>9s} {'IBclim':>9s} {'ratio':>8s}"
+    )
+    for row in rows:
+        basin_name = str(row.get("basin_name", ""))
+        if basin_name not in basin_order:
+            continue
+        geos_clim = safe_float(row.get("geos_clim_ace"))
+        ibtracs_clim = safe_float(row.get("ibtracs_clim_ace"))
+        ratio = geos_clim / ibtracs_clim if ibtracs_clim > 0.0 and np.isfinite(geos_clim) else float("nan")
+        n_years = safe_float(row.get("n_years"))
+        print(
+            f"{str(row.get('lead', '')):7s} "
+            f"{str(row.get('month', '')):>3s} "
+            f"{basin_name:20s} "
+            f"{int(n_years) if np.isfinite(n_years) else 0:3d} "
+            f"{format_float(row.get('anom_corr'))} "
+            f"{format_float(row.get('anom_rmse'))} "
+            f"{format_float(row.get('anom_mae'))} "
+            f"{format_float(row.get('raw_bias'), width=9)} "
+            f"{format_float(geos_clim, width=9)} "
+            f"{format_float(ibtracs_clim, width=9)} "
+            f"{format_float(ratio)}"
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR)
@@ -403,8 +463,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--basin-method", choices=("boxes", "ibtracs_code"), default="boxes")
     parser.add_argument("--all-hours", dest="synoptic_only", action="store_false")
     parser.add_argument("--use-cached-tables", action="store_true", help="Read cached CSV tables and redraw plots only.")
+    parser.add_argument(
+        "--no-print-skill-summary",
+        dest="print_skill_summary",
+        action="store_false",
+        help="Do not print the compact skill metric table after plotting.",
+    )
     parser.add_argument("--dpi", type=int, default=300)
     parser.set_defaults(synoptic_only=True)
+    parser.set_defaults(print_skill_summary=True)
     add_ocean_only_args(parser)
     args = parser.parse_args(argv)
 
@@ -436,6 +503,8 @@ def main(argv: list[str] | None = None) -> int:
     for lead in leads:
         plot_anomaly_panels(yearly, lead, plot_dir / f"{args.prefix}_{lead}_anomalies_by_basin.png", args.dpi)
     plot_skill(skill, plot_dir / f"{args.prefix}_skill_by_basin.png", args.dpi)
+    if args.print_skill_summary:
+        print_skill_summary(skill)
     return 0
 
 
