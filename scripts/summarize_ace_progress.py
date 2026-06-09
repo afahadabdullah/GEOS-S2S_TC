@@ -23,9 +23,16 @@ def parse_list(value: str | None) -> list[str]:
 
 def parse_years(value: str | None) -> set[int]:
     years: set[int] = set()
-    for item in parse_list(value):
+    if not value:
+        return years
+    # Keep ':' and '-' intact here so ranges like 1991:2024 are expanded
+    # instead of being interpreted as the two isolated years 1991 and 2024.
+    for item in [part for part in re.split(r"[\s,]+", value.strip()) if part]:
         if ":" in item:
             start, end = item.split(":", 1)
+            years.update(range(int(start), int(end) + 1))
+        elif "-" in item:
+            start, end = item.split("-", 1)
             years.update(range(int(start), int(end) + 1))
         else:
             years.add(int(item))
