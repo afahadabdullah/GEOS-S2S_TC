@@ -80,6 +80,12 @@ def safe_float(value: object) -> float:
         return float("nan")
 
 
+def finite_percentile(values: list[float] | np.ndarray, percentile: float) -> float:
+    array = np.asarray(values, dtype="float64")
+    array = array[np.isfinite(array)]
+    return float(np.nanpercentile(array, percentile)) if array.size else float("nan")
+
+
 def setup_axis(ax, ylabel: str | None = None) -> None:
     ax.grid(axis="y", color=GRID_COLOR, linestyle="--", linewidth=0.7, alpha=0.55)
     ax.spines["top"].set_visible(False)
@@ -441,6 +447,235 @@ def plot_anomaly_timeseries_by_basin(yearly: list[dict[str, object]], path: Path
             if row_idx == 0 and col_idx == 0:
                 ax.legend(frameon=False, fontsize=7.8, loc="upper left")
     fig.suptitle("ACE Anomaly Time Series by Basin", fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> Saved {path}")
+
+
+def series_correlation(geos_values: np.ndarray, obs_values: np.ndarray) -> float:
+    mask = np.isfinite(geos_values) & np.isfinite(obs_values)
+    if int(np.sum(mask)) < 3:
+        return float("nan")
+    x = geos_values[mask]
+    y = obs_values[mask]
+    if float(np.nanstd(x)) == 0.0 or float(np.nanstd(y)) == 0.0:
+        return float("nan")
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def member_sort_key(member_id: str) -> tuple[int, int, str]:
+    init_date, _, ens = member_id.partition(":")
+    match = re.search(r"(\d+)$", ens)
+    ens_number = int(match.group(1)) if match else 999
+    return int(init_date) if init_date.isdigit() else 0, ens_number, ens
+
+
+def north_atlantic_member_series(
+    member_rows: list[dict[str, object]],
+    yearly_rows: list[dict[str, object]],
+    years: list[int],
+    lead_months: list[tuple[str, str]],
+) -> list[dict[str, object]]:
+    year_set = set(years)
+    series: list[dict[str, object]] = []
+    for lead, month in lead_months:
+        obs_by_year: dict[int, float] = {}
+        member_by_year: dict[int, dict[str, float]] = defaultdict(dict)
+        for row in yearly_rows:
+            if (
+                int(row["year"]) in year_set
+                and str(row["basin_name"]) == "North Atlantic"
+                and str(row["lead"]) == lead
+            ):
+                obs_by_year[int(row["year"])] = safe_float(row.get("ibtracs_ace"))
+        for row in member_rows:
+            if (
+                int(row["year"]) in year_set
+                and str(row["basin_name"]) == "North Atlantic"
+                and str(row["lead"]) == lead
+            ):
+                value = safe_float(row.get("geos_member_ace"))
+                if np.isfinite(value):
+                    member_by_year[int(row["year"])][f"{row['init_date']}:{row['ens']}"] = value
+        series.append(
+            {
+                "series": lead,
+                "label": f"{lead} ({month})",
+                "month": month,
+                "obs_by_year": obs_by_year,
+                "member_by_year": member_by_year,
+            }
+        )
+
+    obs_sep_oct: dict[int, float] = defaultdict(float)
+    obs_count: dict[int, int] = defaultdict(int)
+    for row in yearly_rows:
+        if int(row["year"]) not in year_set or str(row["basin_name"]) != "North Atlantic":
+            continue
+        if str(row["lead"]) not in {lead for lead, _month in lead_months}:
+            continue
+        value = safe_float(row.get("ibtracs_ace"))
+        if np.isfinite(value):
+            obs_sep_oct[int(row["year"])] += value
+            obs_count[int(row["year"])] += 1
+
+    member_sep_oct: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    member_count: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    valid_leads = {lead for lead, _month in lead_months}
+    for row in member_rows:
+        if int(row["year"]) not in year_set or str(row["basin_name"]) != "North Atlantic" or str(row["lead"]) not in valid_leads:
+            continue
+        value = safe_float(row.get("geos_member_ace"))
+        if not np.isfinite(value):
+            continue
+        year = int(row["year"])
+        member_id = f"{row['init_date']}:{row['ens']}"
+        member_sep_oct[year][member_id] += value
+        member_count[year][member_id] += 1
+
+    required_count = len(lead_months)
+    series.append(
+        {
+            "series": "sep_oct",
+            "label": "Sep+Oct",
+            "month": ",".join(month for _lead, month in lead_months),
+            "obs_by_year": {year: value for year, value in obs_sep_oct.items() if obs_count[year] == required_count},
+            "member_by_year": {
+                year: {
+                    member_id: value
+                    for member_id, value in member_values.items()
+                    if member_count[year].get(member_id, 0) == required_count
+                }
+                for year, member_values in member_sep_oct.items()
+            },
+        }
+    )
+    return series
+
+
+def metric_summary_for_member_size(
+    member_rows: list[dict[str, object]],
+    yearly_rows: list[dict[str, object]],
+    years: list[int],
+    lead_months: list[tuple[str, str]],
+    max_members: int,
+    samples: int,
+    seed: int,
+) -> list[dict[str, object]]:
+    rng = np.random.default_rng(seed)
+    rows: list[dict[str, object]] = []
+    for spec in north_atlantic_member_series(member_rows, yearly_rows, years, lead_months):
+        obs_by_year = spec["obs_by_year"]
+        member_by_year = spec["member_by_year"]
+        available_max = 0
+        for year in years:
+            available_max = max(available_max, len(member_by_year.get(year, {})))
+        upper = min(max_members, available_max)
+        for size in range(1, upper + 1):
+            corr_values: list[float] = []
+            rmse_values: list[float] = []
+            bias_values: list[float] = []
+            mae_values: list[float] = []
+            n_years_values: list[int] = []
+            n_draws = max(1, samples)
+            for _draw in range(n_draws):
+                geos_values: list[float] = []
+                obs_values: list[float] = []
+                for year in years:
+                    obs = safe_float(obs_by_year.get(year))
+                    members = member_by_year.get(year, {})
+                    if not np.isfinite(obs) or len(members) < size:
+                        continue
+                    member_ids = sorted(members, key=member_sort_key)
+                    if size < len(member_ids):
+                        chosen = rng.choice(np.asarray(member_ids, dtype=object), size=size, replace=False)
+                    else:
+                        chosen = np.asarray(member_ids, dtype=object)
+                    geos_values.append(float(np.nanmean([members[str(member_id)] for member_id in chosen])))
+                    obs_values.append(obs)
+                geos = np.asarray(geos_values, dtype="float64")
+                obs = np.asarray(obs_values, dtype="float64")
+                mask = np.isfinite(geos) & np.isfinite(obs)
+                if int(np.sum(mask)) < 3:
+                    corr_values.append(float("nan"))
+                    rmse_values.append(float("nan"))
+                    bias_values.append(float("nan"))
+                    mae_values.append(float("nan"))
+                    n_years_values.append(int(np.sum(mask)))
+                    continue
+                geos_valid = geos[mask]
+                obs_valid = obs[mask]
+                geos_anom = geos_valid - float(np.nanmean(geos_valid))
+                obs_anom = obs_valid - float(np.nanmean(obs_valid))
+                diff = geos_anom - obs_anom
+                raw_diff = geos_valid - obs_valid
+                corr_values.append(series_correlation(geos_valid, obs_valid))
+                rmse_values.append(float(np.sqrt(np.nanmean(diff**2))))
+                bias_values.append(float(np.nanmean(raw_diff)))
+                mae_values.append(float(np.nanmean(np.abs(diff))))
+                n_years_values.append(int(np.sum(mask)))
+
+            rows.append(
+                {
+                    "series": spec["series"],
+                    "label": spec["label"],
+                    "month": spec["month"],
+                    "ensemble_size": size,
+                    "samples": n_draws,
+                    "n_years": int(np.nanmedian(n_years_values)) if n_years_values else 0,
+                    "anom_corr_mean": float(np.nanmean(corr_values)) if np.isfinite(corr_values).any() else float("nan"),
+                    "anom_corr_p10": finite_percentile(corr_values, 10),
+                    "anom_corr_p90": finite_percentile(corr_values, 90),
+                    "anom_rmse_mean": float(np.nanmean(rmse_values)) if np.isfinite(rmse_values).any() else float("nan"),
+                    "anom_rmse_p10": finite_percentile(rmse_values, 10),
+                    "anom_rmse_p90": finite_percentile(rmse_values, 90),
+                    "raw_bias_mean": float(np.nanmean(bias_values)) if np.isfinite(bias_values).any() else float("nan"),
+                    "raw_bias_p10": finite_percentile(bias_values, 10),
+                    "raw_bias_p90": finite_percentile(bias_values, 90),
+                    "anom_mae_mean": float(np.nanmean(mae_values)) if np.isfinite(mae_values).any() else float("nan"),
+                    "anom_mae_p10": finite_percentile(mae_values, 10),
+                    "anom_mae_p90": finite_percentile(mae_values, 90),
+                }
+            )
+    return rows
+
+
+def plot_north_atlantic_ensemble_size_skill(rows: list[dict[str, object]], path: Path, dpi: int) -> None:
+    if not rows:
+        return
+    series_order = ["lead1", "lead2", "sep_oct"]
+    labels = {str(row["series"]): str(row["label"]) for row in rows}
+    present = [series for series in series_order if any(str(row["series"]) == series for row in rows)]
+    metrics = [
+        ("anom_corr", "Anomaly correlation", 0.0),
+        ("anom_rmse", "Anomaly RMSE", None),
+        ("raw_bias", "Raw bias", 0.0),
+    ]
+    fig, axes = plt.subplots(len(metrics), len(present), figsize=(5.3 * len(present), 10.2), sharex=True, dpi=dpi)
+    axes = np.asarray(axes)
+    if axes.ndim == 1:
+        axes = axes[:, np.newaxis]
+    for col, series in enumerate(present):
+        series_rows = sorted([row for row in rows if str(row["series"]) == series], key=lambda row: int(row["ensemble_size"]))
+        x = np.asarray([int(row["ensemble_size"]) for row in series_rows], dtype="int32")
+        for row_idx, (metric, ylabel, refline) in enumerate(metrics):
+            ax = axes[row_idx, col]
+            mean = np.asarray([safe_float(row.get(f"{metric}_mean")) for row in series_rows], dtype="float64")
+            p10 = np.asarray([safe_float(row.get(f"{metric}_p10")) for row in series_rows], dtype="float64")
+            p90 = np.asarray([safe_float(row.get(f"{metric}_p90")) for row in series_rows], dtype="float64")
+            ax.plot(x, mean, color=GEOS_BLUE, marker="o", linewidth=1.8)
+            if np.any(np.isfinite(p10) & np.isfinite(p90)):
+                ax.fill_between(x, p10, p90, color=SPREAD_BLUE, alpha=0.35, linewidth=0)
+            if refline is not None:
+                ax.axhline(refline, color=PLOT_BLACK, linestyle="--", linewidth=0.9)
+            setup_axis(ax, ylabel if col == 0 else None)
+            ax.set_title(labels.get(series, series) if row_idx == 0 else "", fontsize=11, fontweight="bold")
+            ax.set_xticks(x)
+            if row_idx == len(metrics) - 1:
+                ax.set_xlabel("Number of GEOS members")
+    fig.suptitle("North Atlantic Skill Sensitivity to Ensemble Size", fontsize=14, fontweight="bold")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
@@ -1332,6 +1567,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-lat", type=float, default=50.0)
     parser.add_argument("--focus-year", type=int, default=2020)
     parser.add_argument("--map-bin-size", type=float, default=5.0, help="Lat/lon bin size for focus-year count and ACE-difference maps.")
+    parser.add_argument("--ensemble-size-max", type=int, default=20, help="Maximum ensemble size for North Atlantic skill sensitivity.")
+    parser.add_argument("--ensemble-size-samples", type=int, default=200, help="Bootstrap subset draws per ensemble size.")
+    parser.add_argument("--ensemble-size-seed", type=int, default=12345, help="Random seed for ensemble-size subset draws.")
     parser.add_argument("--table-dir", default=DEFAULT_TABLE_DIR)
     parser.add_argument("--plot-dir", default=DEFAULT_PLOT_DIR)
     parser.add_argument("--prefix", default=DEFAULT_PREFIX)
@@ -1384,6 +1622,27 @@ def main() -> int:
     plot_north_atlantic_timeseries(yearly, plot_dir / f"{args.prefix}_north_atlantic_timeseries_spread.png", args.dpi)
     plot_na_scatter(yearly, plot_dir / f"{args.prefix}_north_atlantic_anomaly_scatter.png", args.dpi)
     plot_anomaly_timeseries_by_basin(yearly, plot_dir / f"{args.prefix}_anomaly_timeseries_by_basin.png", args.dpi)
+    ensemble_size_rows = metric_summary_for_member_size(
+        member_rows,
+        yearly,
+        years_used,
+        parse_lead_months(args.lead_months),
+        args.ensemble_size_max,
+        args.ensemble_size_samples,
+        args.ensemble_size_seed,
+    )
+    write_csv(table_dir / f"{args.prefix}_north_atlantic_ensemble_size_skill.csv", ensemble_size_rows, [
+        "series", "label", "month", "ensemble_size", "samples", "n_years",
+        "anom_corr_mean", "anom_corr_p10", "anom_corr_p90",
+        "anom_rmse_mean", "anom_rmse_p10", "anom_rmse_p90",
+        "raw_bias_mean", "raw_bias_p10", "raw_bias_p90",
+        "anom_mae_mean", "anom_mae_p10", "anom_mae_p90",
+    ])
+    plot_north_atlantic_ensemble_size_skill(
+        ensemble_size_rows,
+        plot_dir / f"{args.prefix}_north_atlantic_ensemble_size_skill.png",
+        args.dpi,
+    )
 
     focus_basin_rows = build_focus_year_sep_oct_basin_ace(member_rows, yearly_all, args.focus_year)
     write_csv(table_dir / f"{args.prefix}_{args.focus_year}_sep_oct_basin_ace.csv", focus_basin_rows, [
