@@ -30,8 +30,9 @@ except ImportError:
     print("ERROR: netCDF4 package is required. Load the earth environment.", file=sys.stderr)
     sys.exit(2)
 
+import calculate_tc_conditioned_ace as tcace
 from calculate_ibtracs_observed_percentiles import basin_from_boxes, basin_from_code, decode_chars, read_storm_time_text
-from calculate_tc_conditioned_ace import BASINS, HAS_CARTOPY, ccrs, cfeature, read_cache
+from calculate_tc_conditioned_ace import BASINS, HAS_CARTOPY, read_cache
 from plot_ace_lead_anomaly_skill import (
     SKILL_FIELDS,
     YEARLY_FIELDS,
@@ -58,6 +59,8 @@ GEOS_BLUE = "#334f8d"
 OBS_ORANGE = "#d95f02"
 SPREAD_BLUE = "#9fb0d2"
 GRID_COLOR = "#d1d5db"
+ccrs = getattr(tcace, "ccrs", None)
+cfeature = getattr(tcace, "cfeature", None)
 
 
 def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
@@ -500,6 +503,325 @@ def read_ibtracs_track_points(
     return rows
 
 
+def read_ibtracs_focus_points(args: argparse.Namespace, lead_months: list[tuple[str, str]]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for lead, month in lead_months:
+        for basin_name in BASIN_ORDER:
+            points = read_ibtracs_track_points(
+                Path(args.ibtracs),
+                args.focus_year,
+                month,
+                basin_name,
+                args.wind_var,
+                args.threshold_kt,
+                args.nature_filter,
+                args.basin_method,
+                args.ocean_only,
+            )
+            for point in points:
+                lat = safe_float(point.get("lat"))
+                if not np.isfinite(lat) or lat < args.min_lat or lat > args.max_lat:
+                    continue
+                point.update(
+                    {
+                        "source": "IBTrACS",
+                        "year": args.focus_year,
+                        "lead": lead,
+                        "month": month,
+                        "basin_name": basin_name,
+                        "init_date": "",
+                        "ens": "",
+                        "vmax_kt": point.get("wind_kt", ""),
+                    }
+                )
+                rows.append(point)
+    return rows
+
+
+def read_geos_tc_points_for_year(
+    cache_dir: Path,
+    init_dates: list[str],
+    lead_months: list[tuple[str, str]],
+    year: int,
+    min_lat: float,
+    max_lat: float,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    month_to_lead = {month: lead for lead, month in lead_months}
+    files = discover_member_files(cache_dir, {year}, init_dates)
+    for path in files:
+        info = cache_member_info(path)
+        if info is None:
+            continue
+        init_date, ens = info
+        _init, _ens, _lats, _lons, times, _local_ace, diagnostics, _uses_vort, _monthly = read_cache(path)
+        time_months = np.asarray([time.strftime("%m") for time in times])
+        for basin_name in BASIN_ORDER:
+            basin_diag = diagnostics.get(basin_name, {})
+            step_ace = np.asarray(basin_diag.get("step_ace", []), dtype="float64")
+            center_lat = np.asarray(basin_diag.get("center_lat", []), dtype="float64")
+            center_lon = np.asarray(basin_diag.get("center_lon", []), dtype="float64")
+            vmax = np.asarray(basin_diag.get("vmax_kt", []), dtype="float64")
+            tc_flag = np.asarray(basin_diag.get("tc_flag", []), dtype="float64")
+            if not step_ace.size:
+                continue
+            n_steps = min(len(times), step_ace.size, center_lat.size, center_lon.size)
+            for idx in range(n_steps):
+                month = str(time_months[idx])
+                lead = month_to_lead.get(month)
+                if lead is None:
+                    continue
+                ace_value = float(step_ace[idx])
+                lat = float(center_lat[idx])
+                lon = float(center_lon[idx])
+                if not np.isfinite(ace_value) or ace_value <= 0.0:
+                    continue
+                if not np.isfinite(lat) or not np.isfinite(lon) or lat < min_lat or lat > max_lat:
+                    continue
+                vmax_value = float(vmax[idx]) if idx < vmax.size and np.isfinite(vmax[idx]) else float("nan")
+                flag_value = int(tc_flag[idx]) if idx < tc_flag.size and np.isfinite(tc_flag[idx]) else 0
+                rows.append(
+                    {
+                        "source": "GEOS",
+                        "year": year,
+                        "lead": lead,
+                        "month": month,
+                        "init_date": init_date,
+                        "ens": ens,
+                        "member_id": f"{init_date}:{ens}",
+                        "basin_name": basin_name,
+                        "time": times[idx].strftime("%Y-%m-%d %H:%M"),
+                        "lat": lat,
+                        "lon": ((lon + 180.0) % 360.0) - 180.0,
+                        "ace": ace_value,
+                        "vmax_kt": vmax_value,
+                        "tc_flag": flag_value,
+                        "cache_file": path.name,
+                    }
+                )
+    return rows
+
+
+def build_focus_year_sep_oct_basin_ace(
+    member_rows: list[dict[str, object]],
+    yearly: list[dict[str, object]],
+    year: int,
+) -> list[dict[str, object]]:
+    basins = ["All Basins"] + BASIN_ORDER
+    member_totals: dict[str, dict[str, float]] = {basin: defaultdict(float) for basin in basins}
+    member_seen: dict[str, set[str]] = {basin: set() for basin in basins}
+    for row in member_rows:
+        if int(row["year"]) != year:
+            continue
+        basin = str(row["basin_name"])
+        if basin not in member_totals:
+            continue
+        value = safe_float(row.get("geos_member_ace"))
+        if not np.isfinite(value):
+            continue
+        member_id = f"{row['init_date']}:{row['ens']}"
+        member_totals[basin][member_id] += value
+        member_seen[basin].add(member_id)
+
+    observed_totals: dict[str, float] = defaultdict(float)
+    for row in yearly:
+        if int(row["year"]) != year:
+            continue
+        basin = str(row["basin_name"])
+        if basin in basins:
+            observed_totals[basin] += safe_float(row.get("ibtracs_ace"))
+
+    rows: list[dict[str, object]] = []
+    for basin in basins:
+        values = np.asarray([member_totals[basin][member] for member in sorted(member_seen[basin])], dtype="float64")
+        geos_mean = float(np.nanmean(values)) if values.size else float("nan")
+        geos_std = float(np.nanstd(values)) if values.size > 1 else 0.0
+        ibtracs = float(observed_totals.get(basin, np.nan))
+        rows.append(
+            {
+                "year": year,
+                "months": "09,10",
+                "basin_name": basin,
+                "geos_mean_ace": geos_mean,
+                "geos_std_ace": geos_std,
+                "ibtracs_ace": ibtracs,
+                "bias": geos_mean - ibtracs if np.isfinite(geos_mean) and np.isfinite(ibtracs) else float("nan"),
+                "ratio": geos_mean / ibtracs if np.isfinite(geos_mean) and np.isfinite(ibtracs) and ibtracs > 0.0 else float("nan"),
+                "n_members": int(values.size),
+            }
+        )
+    return rows
+
+
+def build_focus_year_count_rows(
+    geos_points: list[dict[str, object]],
+    ibtracs_points: list[dict[str, object]],
+    year: int,
+    member_ids: list[str],
+) -> list[dict[str, object]]:
+    basins = ["All Basins"] + BASIN_ORDER
+    geos_member_counts: dict[str, dict[str, int]] = {basin: {member_id: 0 for member_id in member_ids} for basin in basins}
+    ibtracs_counts: dict[str, int] = {basin: 0 for basin in basins}
+    for row in geos_points:
+        basin = str(row["basin_name"])
+        member_id = str(row.get("member_id") or f"{row.get('init_date', '')}:{row.get('ens', '')}")
+        if basin in geos_member_counts:
+            if member_id not in geos_member_counts["All Basins"]:
+                member_ids.append(member_id)
+                for counts in geos_member_counts.values():
+                    counts[member_id] = 0
+            geos_member_counts[basin][member_id] += 1
+            geos_member_counts["All Basins"][member_id] += 1
+    for row in ibtracs_points:
+        basin = str(row["basin_name"])
+        if basin in ibtracs_counts:
+            ibtracs_counts[basin] += 1
+            ibtracs_counts["All Basins"] += 1
+
+    rows: list[dict[str, object]] = []
+    for basin in basins:
+        values = np.asarray([geos_member_counts[basin][member_id] for member_id in member_ids], dtype="float64")
+        geos_mean = float(np.nanmean(values)) if values.size else 0.0
+        geos_std = float(np.nanstd(values)) if values.size > 1 else 0.0
+        obs = int(ibtracs_counts.get(basin, 0))
+        rows.append(
+            {
+                "year": year,
+                "months": "09,10",
+                "basin_name": basin,
+                "geos_fix_count_mean_per_member": geos_mean,
+                "geos_fix_count_std_per_member": geos_std,
+                "ibtracs_fix_count": obs,
+                "ratio": geos_mean / obs if obs > 0 else float("nan"),
+                "n_geos_members": int(len(member_ids)),
+            }
+        )
+    return rows
+
+
+def plot_focus_year_sep_oct_basin_ace(rows: list[dict[str, object]], path: Path, year: int, dpi: int) -> None:
+    basins = ["All Basins"] + BASIN_ORDER
+    row_by_basin = {str(row["basin_name"]): row for row in rows}
+    geos = np.asarray([safe_float(row_by_basin.get(basin, {}).get("geos_mean_ace")) for basin in basins], dtype="float64")
+    spread = np.asarray([safe_float(row_by_basin.get(basin, {}).get("geos_std_ace")) for basin in basins], dtype="float64")
+    ibtracs = np.asarray([safe_float(row_by_basin.get(basin, {}).get("ibtracs_ace")) for basin in basins], dtype="float64")
+    x = np.arange(len(basins))
+    width = 0.36
+
+    fig, ax = plt.subplots(figsize=(13.8, 5.8), dpi=dpi)
+    ax.bar(x - width / 2, geos, width, yerr=spread, capsize=2.8, color=GEOS_BLUE, label="GEOS mean/member")
+    ax.bar(x + width / 2, ibtracs, width, color=PLOT_BLACK, alpha=0.88, label="IBTrACS")
+    setup_axis(ax, "Sep+Oct ACE")
+    ax.set_xticks(x)
+    ax.set_xticklabels(basins, rotation=27, ha="right")
+    ax.set_title(f"{year} Sep+Oct ACE by Basin", fontsize=14, fontweight="bold")
+    ax.legend(frameon=False, ncol=2)
+    for idx, (g_value, o_value) in enumerate(zip(geos, ibtracs)):
+        if np.isfinite(g_value) and np.isfinite(o_value) and o_value > 0:
+            y = max(g_value + spread[idx] if np.isfinite(spread[idx]) else g_value, o_value)
+            ax.text(idx, y * 1.03 if y > 0 else 0.05, f"{g_value / o_value:.2f}x", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> Saved {path}")
+
+
+def plot_focus_year_tc_locations_counts(
+    geos_points: list[dict[str, object]],
+    ibtracs_points: list[dict[str, object]],
+    count_rows: list[dict[str, object]],
+    path: Path,
+    year: int,
+    min_lat: float,
+    max_lat: float,
+    dpi: int,
+) -> None:
+    basins = BASIN_ORDER
+    fig = plt.figure(figsize=(15.0, 8.2), dpi=dpi)
+    gs = fig.add_gridspec(2, 1, height_ratios=[2.2, 1.0], hspace=0.28)
+    if HAS_CARTOPY and ccrs is not None and cfeature is not None:
+        ax_map = fig.add_subplot(gs[0, 0], projection=ccrs.PlateCarree())
+        ax_map.set_extent((-180.0, 180.0, min_lat, max_lat), crs=ccrs.PlateCarree())
+        ax_map.add_feature(cfeature.OCEAN, facecolor="#dff1fb", zorder=0)
+        ax_map.add_feature(cfeature.LAND, facecolor="#f2eee7", zorder=1)
+        ax_map.add_feature(cfeature.COASTLINE, linewidth=0.45, edgecolor="#555555", zorder=4)
+        ax_map.add_feature(cfeature.BORDERS, linewidth=0.25, edgecolor="#aaaaaa", linestyle=":", zorder=4)
+        gl = ax_map.gridlines(draw_labels=True, linewidth=0.25, color="#888888", alpha=0.35, linestyle="--", zorder=5)
+        gl.top_labels = False
+        gl.right_labels = False
+        gl.xlabel_style = {"size": 8}
+        gl.ylabel_style = {"size": 8}
+        transform = ccrs.PlateCarree()
+    else:
+        ax_map = fig.add_subplot(gs[0, 0])
+        ax_map.set_xlim(-180.0, 180.0)
+        ax_map.set_ylim(min_lat, max_lat)
+        ax_map.set_xlabel("Longitude")
+        ax_map.set_ylabel("Latitude")
+        ax_map.grid(True, linestyle="--", alpha=0.3)
+        transform = None
+
+    for basin_name in basins:
+        color = BASINS[basin_name]["color"]
+        geos = [row for row in geos_points if str(row["basin_name"]) == basin_name]
+        if geos:
+            kwargs = {"transform": transform} if transform is not None else {}
+            ax_map.scatter(
+                [safe_float(row["lon"]) for row in geos],
+                [safe_float(row["lat"]) for row in geos],
+                s=9,
+                color=color,
+                alpha=0.22,
+                linewidths=0,
+                label=basin_name,
+                zorder=2,
+                **kwargs,
+            )
+    if ibtracs_points:
+        kwargs = {"transform": transform} if transform is not None else {}
+        ax_map.scatter(
+            [safe_float(row["lon"]) for row in ibtracs_points],
+            [safe_float(row["lat"]) for row in ibtracs_points],
+            s=28,
+            marker="x",
+            color=PLOT_BLACK,
+            alpha=0.88,
+            linewidths=1.0,
+            label="IBTrACS fixes",
+            zorder=6,
+            **kwargs,
+        )
+    ax_map.set_title(f"{year} Sep+Oct ACE-Contributing TC Locations: GEOS Members vs IBTrACS", fontsize=13.5, fontweight="bold")
+    ax_map.legend(loc="lower left", ncol=4, fontsize=8, frameon=True, framealpha=0.88)
+
+    ax_bar = fig.add_subplot(gs[1, 0])
+    row_by_basin = {str(row["basin_name"]): row for row in count_rows}
+    x = np.arange(len(basins))
+    width = 0.36
+    geos_counts = np.asarray(
+        [safe_float(row_by_basin.get(basin, {}).get("geos_fix_count_mean_per_member")) for basin in basins],
+        dtype="float64",
+    )
+    geos_spread = np.asarray(
+        [safe_float(row_by_basin.get(basin, {}).get("geos_fix_count_std_per_member")) for basin in basins],
+        dtype="float64",
+    )
+    ib_counts = np.asarray([safe_float(row_by_basin.get(basin, {}).get("ibtracs_fix_count")) for basin in basins], dtype="float64")
+    ax_bar.bar(x - width / 2, geos_counts, width, yerr=geos_spread, capsize=2.5, color=GEOS_BLUE, label="GEOS fixes/member")
+    ax_bar.bar(x + width / 2, ib_counts, width, color=PLOT_BLACK, alpha=0.88, label="IBTrACS fixes")
+    setup_axis(ax_bar, "Fix count")
+    ax_bar.set_xticks(x)
+    ax_bar.set_xticklabels(basins, rotation=24, ha="right")
+    ax_bar.legend(frameon=False, ncol=2)
+    ax_bar.set_title("Sep+Oct Thresholded Fix Counts", fontsize=11.5, fontweight="bold")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> Saved {path}")
+
+
 def cumulative_geos_na_2020(cache_dir: Path, init_dates: list[str], lead: str, month: str, year: int) -> tuple[list[object], np.ndarray, np.ndarray]:
     files = discover_member_files(cache_dir, {year}, init_dates)
     curves: list[np.ndarray] = []
@@ -618,7 +940,12 @@ def plot_na_2020_diagnostics(
     return summary_rows
 
 
-def print_focus_summary(skill: list[dict[str, object]], focus_rows: list[dict[str, object]]) -> None:
+def print_focus_summary(
+    skill: list[dict[str, object]],
+    focus_rows: list[dict[str, object]],
+    focus_basin_rows: list[dict[str, object]],
+    focus_count_rows: list[dict[str, object]],
+) -> None:
     print("")
     print("North Atlantic focus metrics")
     print(f"{'lead':7s} {'n':>3s} {'r':>8s} {'rmse':>8s} {'mae':>8s} {'bias':>9s} {'GEOSclim':>9s} {'IBclim':>9s} {'ratio':>8s}")
@@ -640,6 +967,25 @@ def print_focus_summary(skill: list[dict[str, object]], focus_rows: list[dict[st
             f"{str(row['lead']):7s} {str(row['month']):>3s} {int(row['n_members']):7d} "
             f"{safe_float(row['geos_mean_ace']):9.3f} {safe_float(row['geos_std_ace']):9.3f} "
             f"{safe_float(row['ibtracs_ace']):9.3f} {safe_float(row['bias']):9.3f}"
+        )
+    print("")
+    print("Focus-year Sep+Oct ACE by basin")
+    print(f"{'basin':20s} {'members':>7s} {'GEOS':>9s} {'spread':>9s} {'IBTrACS':>9s} {'ratio':>8s}")
+    for row in focus_basin_rows:
+        print(
+            f"{str(row['basin_name']):20s} {int(row['n_members']):7d} "
+            f"{safe_float(row['geos_mean_ace']):9.3f} {safe_float(row['geos_std_ace']):9.3f} "
+            f"{safe_float(row['ibtracs_ace']):9.3f} {safe_float(row['ratio']):8.3f}"
+        )
+    print("")
+    print("Focus-year Sep+Oct thresholded fix counts")
+    print(f"{'basin':20s} {'members':>7s} {'GEOS/mem':>9s} {'spread':>9s} {'IBTrACS':>9s} {'ratio':>8s}")
+    for row in focus_count_rows:
+        print(
+            f"{str(row['basin_name']):20s} {int(row['n_geos_members']):7d} "
+            f"{safe_float(row['geos_fix_count_mean_per_member']):9.3f} "
+            f"{safe_float(row['geos_fix_count_std_per_member']):9.3f} "
+            f"{safe_float(row['ibtracs_fix_count']):9.0f} {safe_float(row['ratio']):8.3f}"
         )
 
 
@@ -678,8 +1024,8 @@ def main() -> int:
     table_dir = Path(args.table_dir)
     plot_dir = Path(args.plot_dir)
 
-    member_rows, yearly, skill = build_yearly_skill_tables(args)
-    yearly = filter_yearly_by_member_count(yearly, args.min_members_per_year)
+    member_rows, yearly_all, skill = build_yearly_skill_tables(args)
+    yearly = filter_yearly_by_member_count(yearly_all, args.min_members_per_year)
     add_anomalies(yearly)
     skill = skill_rows(yearly)
 
@@ -714,13 +1060,62 @@ def main() -> int:
     plot_metric_summary(skill, plot_dir / f"{args.prefix}_skill_metrics_by_basin.png", args.dpi)
     plot_north_atlantic_timeseries(yearly, plot_dir / f"{args.prefix}_north_atlantic_timeseries_spread.png", args.dpi)
     plot_na_scatter(yearly, plot_dir / f"{args.prefix}_north_atlantic_anomaly_scatter.png", args.dpi)
-    focus_rows = plot_na_2020_diagnostics(yearly, member_rows, lats, lons, grids_by_lead_year, args, plot_dir)
+    focus_rows = plot_na_2020_diagnostics(yearly_all, member_rows, lats, lons, grids_by_lead_year, args, plot_dir)
     write_csv(table_dir / f"{args.prefix}_{args.focus_year}_north_atlantic_summary.csv", focus_rows, [
         "year", "lead", "month", "basin_name", "geos_mean_ace", "geos_std_ace", "ibtracs_ace", "bias", "n_members",
     ])
+    focus_basin_rows = build_focus_year_sep_oct_basin_ace(member_rows, yearly_all, args.focus_year)
+    write_csv(table_dir / f"{args.prefix}_{args.focus_year}_sep_oct_basin_ace.csv", focus_basin_rows, [
+        "year", "months", "basin_name", "geos_mean_ace", "geos_std_ace", "ibtracs_ace", "bias", "ratio", "n_members",
+    ])
+    plot_focus_year_sep_oct_basin_ace(
+        focus_basin_rows,
+        plot_dir / f"{args.prefix}_{args.focus_year}_sep_oct_basin_ace.png",
+        args.focus_year,
+        args.dpi,
+    )
+
+    geos_points = read_geos_tc_points_for_year(
+        Path(args.cache_dir),
+        parse_list(args.init_dates),
+        parse_lead_months(args.lead_months),
+        args.focus_year,
+        args.min_lat,
+        args.max_lat,
+    )
+    ibtracs_points = read_ibtracs_focus_points(args, parse_lead_months(args.lead_months))
+    focus_member_ids = sorted(
+        {
+            f"{row['init_date']}:{row['ens']}"
+            for row in member_rows
+            if int(row["year"]) == args.focus_year and str(row["basin_name"]) == "All Basins"
+        }
+    )
+    focus_count_rows = build_focus_year_count_rows(geos_points, ibtracs_points, args.focus_year, focus_member_ids)
+    write_csv(table_dir / f"{args.prefix}_{args.focus_year}_sep_oct_geos_tc_points.csv", geos_points, [
+        "source", "year", "lead", "month", "init_date", "ens", "member_id", "basin_name", "time", "lat", "lon",
+        "ace", "vmax_kt", "tc_flag", "cache_file",
+    ])
+    write_csv(table_dir / f"{args.prefix}_{args.focus_year}_sep_oct_ibtracs_tc_points.csv", ibtracs_points, [
+        "source", "year", "lead", "month", "basin_name", "sid", "name", "time", "lat", "lon", "wind_kt", "vmax_kt", "ace",
+    ])
+    write_csv(table_dir / f"{args.prefix}_{args.focus_year}_sep_oct_basin_fix_counts.csv", focus_count_rows, [
+        "year", "months", "basin_name", "geos_fix_count_mean_per_member", "geos_fix_count_std_per_member",
+        "ibtracs_fix_count", "ratio", "n_geos_members",
+    ])
+    plot_focus_year_tc_locations_counts(
+        geos_points,
+        ibtracs_points,
+        focus_count_rows,
+        plot_dir / f"{args.prefix}_{args.focus_year}_sep_oct_tc_locations_counts.png",
+        args.focus_year,
+        args.min_lat,
+        args.max_lat,
+        args.dpi,
+    )
 
     print_skill_summary(skill)
-    print_focus_summary(skill, focus_rows)
+    print_focus_summary(skill, focus_rows, focus_basin_rows, focus_count_rows)
     return 0
 
 
