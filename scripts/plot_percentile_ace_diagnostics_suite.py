@@ -265,18 +265,6 @@ def plot_all_spatial_maps(
             (-100.0, -10.0, 0.0, 45.0),
             args.dpi,
         )
-        year_grids = grids_by_lead_year.get((lead, args.focus_year), [])
-        if year_grids:
-            year_mean = np.nanmean(np.stack(year_grids, axis=0), axis=0)
-            plot_spatial_map(
-                lats,
-                lons,
-                year_mean,
-                plot_dir / f"{args.prefix}_{args.focus_year}_{lead}_north_atlantic_spatial_ace.png",
-                f"North Atlantic GEOS Percentile ACE ({args.focus_year}, {lead})",
-                (-100.0, -10.0, 0.0, 45.0),
-                args.dpi,
-            )
 
 
 def plot_climatology_bars(yearly: list[dict[str, object]], path: Path, dpi: int) -> None:
@@ -421,6 +409,38 @@ def plot_na_scatter(yearly: list[dict[str, object]], path: Path, dpi: int) -> No
         ax.set_xlabel("IBTrACS anomaly")
         ax.set_title(f"North Atlantic {lead}", fontweight="bold")
     fig.suptitle("North Atlantic ACE Anomaly Scatter", fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> Saved {path}")
+
+
+def plot_anomaly_timeseries_by_basin(yearly: list[dict[str, object]], path: Path, dpi: int) -> None:
+    leads = sorted({str(row["lead"]) for row in yearly}, key=lead_sort_key)
+    fig, axes = plt.subplots(len(leads), len(BASIN_ORDER), figsize=(19.0, max(4.2, 3.2 * len(leads))), sharex=True, dpi=dpi)
+    axes = np.atleast_2d(axes)
+    for row_idx, lead in enumerate(leads):
+        for col_idx, basin_name in enumerate(BASIN_ORDER):
+            ax = axes[row_idx, col_idx]
+            rows = rows_for_basin_lead(yearly, basin_name, lead)
+            years = np.asarray([int(row["year"]) for row in rows], dtype="int32")
+            geos_anom = np.asarray([safe_float(row["geos_anom_ace"]) for row in rows], dtype="float64")
+            obs_anom = np.asarray([safe_float(row["ibtracs_anom_ace"]) for row in rows], dtype="float64")
+            spread = np.asarray([safe_float(row["geos_std_ace"]) for row in rows], dtype="float64")
+            color = BASINS[basin_name]["color"]
+            ax.axhline(0.0, color="#94a3b8", linewidth=0.8)
+            ax.plot(years, geos_anom, color=color, marker="o", markersize=2.6, linewidth=1.3, label="GEOS anomaly")
+            if np.any(spread > 0.0):
+                ax.fill_between(years, geos_anom - spread, geos_anom + spread, color=color, alpha=0.18, linewidth=0)
+            ax.plot(years, obs_anom, color=PLOT_BLACK, marker="s", markersize=2.3, linestyle="--", linewidth=1.2, label="IBTrACS anomaly")
+            setup_axis(ax, "ACE anomaly" if col_idx == 0 else None)
+            ax.set_title(f"{basin_name}\n{lead}", fontsize=9.2, fontweight="bold")
+            if row_idx == len(leads) - 1:
+                ax.set_xlabel("Year")
+            if row_idx == 0 and col_idx == 0:
+                ax.legend(frameon=False, fontsize=7.8, loc="upper left")
+    fig.suptitle("ACE Anomaly Time Series by Basin", fontsize=14, fontweight="bold")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
@@ -699,6 +719,77 @@ def build_focus_year_count_rows(
     return rows
 
 
+def point_bin_edges(min_lat: float, max_lat: float, bin_size: float) -> tuple[np.ndarray, np.ndarray]:
+    lat_start = np.floor(min_lat / bin_size) * bin_size
+    lat_end = np.ceil(max_lat / bin_size) * bin_size
+    lat_edges = np.arange(lat_start, lat_end + bin_size * 0.5, bin_size, dtype="float64")
+    lon_edges = np.arange(-180.0, 180.0 + bin_size * 0.5, bin_size, dtype="float64")
+    return lat_edges, lon_edges
+
+
+def bin_points_to_grid(
+    points: list[dict[str, object]],
+    lat_edges: np.ndarray,
+    lon_edges: np.ndarray,
+    value_field: str,
+    member_ids: list[str] | None = None,
+) -> np.ndarray:
+    shape = (len(lat_edges) - 1, len(lon_edges) - 1)
+    if member_ids is None:
+        grid = np.zeros(shape, dtype="float64")
+        member_index: dict[str, int] = {}
+        stack = None
+    else:
+        member_index = {member_id: idx for idx, member_id in enumerate(member_ids)}
+        stack = np.zeros((len(member_ids),) + shape, dtype="float64")
+        grid = np.zeros(shape, dtype="float64")
+
+    for row in points:
+        lat = safe_float(row.get("lat"))
+        lon = safe_float(row.get("lon"))
+        value = 1.0 if value_field == "__count__" else safe_float(row.get(value_field))
+        if not np.isfinite(lat) or not np.isfinite(lon) or not np.isfinite(value):
+            continue
+        lat_idx = int(np.searchsorted(lat_edges, lat, side="right") - 1)
+        lon_norm = ((lon + 180.0) % 360.0) - 180.0
+        if lon_norm == 180.0:
+            lon_norm = -180.0
+        lon_idx = int(np.searchsorted(lon_edges, lon_norm, side="right") - 1)
+        if lat_idx < 0 or lat_idx >= shape[0] or lon_idx < 0 or lon_idx >= shape[1]:
+            continue
+        if stack is None:
+            grid[lat_idx, lon_idx] += value
+        else:
+            member_id = str(row.get("member_id") or f"{row.get('init_date', '')}:{row.get('ens', '')}")
+            if member_id not in member_index:
+                continue
+            stack[member_index[member_id], lat_idx, lon_idx] += value
+
+    if stack is not None:
+        return np.nanmean(stack, axis=0) if stack.shape[0] else grid
+    return grid
+
+
+def binned_grid_rows(lat_edges: np.ndarray, lon_edges: np.ndarray, grids: dict[str, np.ndarray]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    lat_centers = 0.5 * (lat_edges[:-1] + lat_edges[1:])
+    lon_centers = 0.5 * (lon_edges[:-1] + lon_edges[1:])
+    for lat_idx, lat in enumerate(lat_centers):
+        for lon_idx, lon in enumerate(lon_centers):
+            row: dict[str, object] = {
+                "lat": float(lat),
+                "lon": float(lon),
+            }
+            nonzero = False
+            for name, grid in grids.items():
+                value = float(grid[lat_idx, lon_idx])
+                row[name] = value
+                nonzero = nonzero or abs(value) > 0.0
+            if nonzero:
+                rows.append(row)
+    return rows
+
+
 def plot_focus_year_sep_oct_basin_ace(rows: list[dict[str, object]], path: Path, year: int, dpi: int) -> None:
     basins = ["All Basins"] + BASIN_ORDER
     row_by_basin = {str(row["basin_name"]): row for row in rows}
@@ -731,12 +822,16 @@ def plot_focus_year_tc_locations_counts(
     geos_points: list[dict[str, object]],
     ibtracs_points: list[dict[str, object]],
     count_rows: list[dict[str, object]],
+    member_ids: list[str],
     path: Path,
     year: int,
     min_lat: float,
     max_lat: float,
+    bin_size: float,
     dpi: int,
 ) -> None:
+    from matplotlib.colors import LogNorm
+
     basins = BASIN_ORDER
     fig = plt.figure(figsize=(15.0, 8.2), dpi=dpi)
     gs = fig.add_gridspec(2, 1, height_ratios=[2.2, 1.0], hspace=0.28)
@@ -761,6 +856,24 @@ def plot_focus_year_tc_locations_counts(
         ax_map.set_ylabel("Latitude")
         ax_map.grid(True, linestyle="--", alpha=0.3)
         transform = None
+
+    lat_edges, lon_edges = point_bin_edges(min_lat, max_lat, bin_size)
+    count_grid = bin_points_to_grid(geos_points, lat_edges, lon_edges, "__count__", member_ids=member_ids)
+    positive = count_grid[count_grid > 0.0]
+    if positive.size:
+        mesh_kwargs = {"transform": transform} if transform is not None else {}
+        mesh = ax_map.pcolormesh(
+            lon_edges,
+            lat_edges,
+            np.ma.masked_less_equal(count_grid, 0.0),
+            cmap="YlOrRd",
+            norm=LogNorm(vmin=max(float(np.nanmin(positive)), 0.01), vmax=max(float(np.nanpercentile(positive, 99.0)), 0.1)),
+            alpha=0.62,
+            zorder=1,
+            **mesh_kwargs,
+        )
+        cbar = fig.colorbar(mesh, ax=ax_map, orientation="horizontal", pad=0.035, aspect=45, shrink=0.72)
+        cbar.set_label(f"GEOS TC fixes per member per {bin_size:g}deg bin")
 
     for basin_name in basins:
         color = BASINS[basin_name]["color"]
@@ -792,7 +905,7 @@ def plot_focus_year_tc_locations_counts(
             zorder=6,
             **kwargs,
         )
-    ax_map.set_title(f"{year} Sep+Oct ACE-Contributing TC Locations: GEOS Members vs IBTrACS", fontsize=13.5, fontweight="bold")
+    ax_map.set_title(f"{year} Sep+Oct TC Count and Location Diagnostics: GEOS vs IBTrACS", fontsize=13.5, fontweight="bold")
     ax_map.legend(loc="lower left", ncol=4, fontsize=8, frameon=True, framealpha=0.88)
 
     ax_bar = fig.add_subplot(gs[1, 0])
@@ -816,6 +929,110 @@ def plot_focus_year_tc_locations_counts(
     ax_bar.legend(frameon=False, ncol=2)
     ax_bar.set_title("Sep+Oct Thresholded Fix Counts", fontsize=11.5, fontweight="bold")
 
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> Saved {path}")
+
+
+def focus_year_binned_ace_difference(
+    geos_points: list[dict[str, object]],
+    ibtracs_points: list[dict[str, object]],
+    member_ids: list[str],
+    min_lat: float,
+    max_lat: float,
+    bin_size: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    lat_edges, lon_edges = point_bin_edges(min_lat, max_lat, bin_size)
+    geos_ace = bin_points_to_grid(geos_points, lat_edges, lon_edges, "ace", member_ids=member_ids)
+    ibtracs_ace = bin_points_to_grid(ibtracs_points, lat_edges, lon_edges, "ace", member_ids=None)
+    return lat_edges, lon_edges, geos_ace, ibtracs_ace, geos_ace - ibtracs_ace
+
+
+def plot_focus_year_ace_difference_map(
+    lat_edges: np.ndarray,
+    lon_edges: np.ndarray,
+    geos_points: list[dict[str, object]],
+    ibtracs_points: list[dict[str, object]],
+    diff_grid: np.ndarray,
+    path: Path,
+    year: int,
+    min_lat: float,
+    max_lat: float,
+    bin_size: float,
+    dpi: int,
+) -> None:
+    from matplotlib.colors import TwoSlopeNorm
+
+    finite = diff_grid[np.isfinite(diff_grid) & (np.abs(diff_grid) > 0.0)]
+    vmax = float(np.nanpercentile(np.abs(finite), 98.0)) if finite.size else 1.0
+    vmax = max(vmax, 0.05)
+
+    fig = plt.figure(figsize=(15.0, 6.6), dpi=dpi)
+    if HAS_CARTOPY and ccrs is not None and cfeature is not None:
+        ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+        ax.set_extent((-180.0, 180.0, min_lat, max_lat), crs=ccrs.PlateCarree())
+        ax.add_feature(cfeature.OCEAN, facecolor="#dff1fb", zorder=0)
+        ax.add_feature(cfeature.LAND, facecolor="#f2eee7", zorder=1)
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.45, edgecolor="#555555", zorder=4)
+        ax.add_feature(cfeature.BORDERS, linewidth=0.25, edgecolor="#aaaaaa", linestyle=":", zorder=4)
+        gl = ax.gridlines(draw_labels=True, linewidth=0.25, color="#888888", alpha=0.35, linestyle="--", zorder=5)
+        gl.top_labels = False
+        gl.right_labels = False
+        gl.xlabel_style = {"size": 8}
+        gl.ylabel_style = {"size": 8}
+        transform = ccrs.PlateCarree()
+    else:
+        ax = fig.add_subplot(1, 1, 1)
+        ax.set_xlim(-180.0, 180.0)
+        ax.set_ylim(min_lat, max_lat)
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
+        ax.grid(True, linestyle="--", alpha=0.3)
+        transform = None
+
+    mesh_kwargs = {"transform": transform} if transform is not None else {}
+    mesh = ax.pcolormesh(
+        lon_edges,
+        lat_edges,
+        np.ma.masked_where(~np.isfinite(diff_grid) | (diff_grid == 0.0), diff_grid),
+        cmap="RdBu_r",
+        norm=TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax),
+        alpha=0.82,
+        zorder=2,
+        **mesh_kwargs,
+    )
+    if geos_points:
+        kwargs = {"transform": transform} if transform is not None else {}
+        ax.scatter(
+            [safe_float(row["lon"]) for row in geos_points],
+            [safe_float(row["lat"]) for row in geos_points],
+            s=4,
+            color="#30343b",
+            alpha=0.12,
+            linewidths=0,
+            zorder=3,
+            label="GEOS TC centers",
+            **kwargs,
+        )
+    if ibtracs_points:
+        kwargs = {"transform": transform} if transform is not None else {}
+        ax.scatter(
+            [safe_float(row["lon"]) for row in ibtracs_points],
+            [safe_float(row["lat"]) for row in ibtracs_points],
+            s=26,
+            marker="x",
+            color=PLOT_BLACK,
+            alpha=0.85,
+            linewidths=1.0,
+            zorder=5,
+            label="IBTrACS fixes",
+            **kwargs,
+        )
+    cbar = fig.colorbar(mesh, ax=ax, orientation="horizontal", pad=0.07, aspect=45, shrink=0.78)
+    cbar.set_label(f"ACE difference per {bin_size:g}deg bin: GEOS member-mean minus IBTrACS")
+    ax.set_title(f"{year} Sep+Oct Binned ACE Difference: GEOS - IBTrACS", fontsize=13.5, fontweight="bold")
+    ax.legend(loc="lower left", ncol=2, fontsize=8.5, frameon=True, framealpha=0.88)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -847,6 +1064,37 @@ def cumulative_geos_na_2020(cache_dir: Path, init_dates: list[str], lead: str, m
     return times_ref, np.nanmean(stack, axis=0), np.nanstd(stack, axis=0)
 
 
+def cumulative_geos_na_focus_year(
+    cache_dir: Path,
+    init_dates: list[str],
+    lead_months: list[tuple[str, str]],
+    year: int,
+) -> tuple[list[object], np.ndarray, np.ndarray]:
+    months = {month for _lead, month in lead_months}
+    files = discover_member_files(cache_dir, {year}, init_dates)
+    curves: list[np.ndarray] = []
+    times_ref: list[object] | None = None
+    for path in files:
+        info = cache_member_info(path)
+        if info is None:
+            continue
+        _init, _ens, _lats, _lons, times, _local_ace, diagnostics, _uses_vort, _monthly = read_cache(path)
+        mask = np.asarray([time.strftime("%m") in months for time in times], dtype=bool)
+        if not np.any(mask):
+            continue
+        month_times = [time for time, keep in zip(times, mask) if keep]
+        steps = np.asarray(diagnostics["North Atlantic"]["step_ace"], dtype="float64")[mask]
+        curve = np.cumsum(np.nan_to_num(steps, nan=0.0))
+        if times_ref is None:
+            times_ref = month_times
+        if len(month_times) == len(times_ref):
+            curves.append(curve)
+    if not curves or times_ref is None:
+        return [], np.asarray([]), np.asarray([])
+    stack = np.stack(curves, axis=0)
+    return times_ref, np.nanmean(stack, axis=0), np.nanstd(stack, axis=0)
+
+
 def cumulative_ibtracs_from_points(points: list[dict[str, object]]) -> tuple[list[object], np.ndarray]:
     grouped: dict[str, float] = defaultdict(float)
     for row in points:
@@ -854,6 +1102,80 @@ def cumulative_ibtracs_from_points(points: list[dict[str, object]]) -> tuple[lis
     times = sorted(grouped)
     time_values = [datetime.strptime(time, "%Y-%m-%d %H:%M") for time in times]
     return time_values, np.cumsum([grouped[time] for time in times])
+
+
+def plot_na_focus_year_sep_oct_diagnostics(
+    member_rows: list[dict[str, object]],
+    ibtracs_points: list[dict[str, object]],
+    focus_basin_rows: list[dict[str, object]],
+    args: argparse.Namespace,
+    plot_dir: Path,
+) -> list[dict[str, object]]:
+    member_totals: dict[str, float] = defaultdict(float)
+    for row in member_rows:
+        if int(row["year"]) != args.focus_year or str(row["basin_name"]) != "North Atlantic":
+            continue
+        value = safe_float(row.get("geos_member_ace"))
+        if np.isfinite(value):
+            member_totals[f"{row['init_date']}:{row['ens']}"] += value
+    member_values = np.asarray([member_totals[key] for key in sorted(member_totals)], dtype="float64")
+    focus_row = next((row for row in focus_basin_rows if str(row["basin_name"]) == "North Atlantic"), {})
+    obs_value = safe_float(focus_row.get("ibtracs_ace"))
+    geos_mean = float(np.nanmean(member_values)) if member_values.size else float("nan")
+    geos_std = float(np.nanstd(member_values)) if member_values.size > 1 else 0.0
+    summary_rows = [
+        {
+            "year": args.focus_year,
+            "lead": "sep_oct",
+            "month": "09,10",
+            "basin_name": "North Atlantic",
+            "geos_mean_ace": geos_mean,
+            "geos_std_ace": geos_std,
+            "ibtracs_ace": obs_value,
+            "bias": geos_mean - obs_value if np.isfinite(geos_mean) and np.isfinite(obs_value) else np.nan,
+            "n_members": int(np.sum(np.isfinite(member_values))),
+        }
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14.8, 5.1), dpi=args.dpi)
+    ax = axes[0]
+    if member_values.size:
+        ax.hist(member_values[np.isfinite(member_values)], bins=14, color=GEOS_BLUE, alpha=0.75, label="GEOS members")
+    ax.axvline(geos_mean, color=GEOS_BLUE, linewidth=2.0, label="GEOS mean")
+    if np.isfinite(obs_value):
+        ax.axvline(obs_value, color=PLOT_BLACK, linestyle="--", linewidth=2.0, label="IBTrACS")
+    setup_axis(ax, "Member count")
+    ax.set_xlabel("Sep+Oct North Atlantic ACE")
+    ax.set_title(f"{args.focus_year} Sep+Oct Member Distribution", fontweight="bold")
+    ax.legend(frameon=False, fontsize=9)
+
+    ax = axes[1]
+    times_geos, mean_curve, std_curve = cumulative_geos_na_focus_year(
+        Path(args.cache_dir),
+        parse_list(args.init_dates),
+        parse_lead_months(args.lead_months),
+        args.focus_year,
+    )
+    if len(times_geos):
+        ax.plot(times_geos, mean_curve, color=GEOS_BLUE, linewidth=1.8, label="GEOS mean")
+        ax.fill_between(times_geos, mean_curve - std_curve, mean_curve + std_curve, color=SPREAD_BLUE, alpha=0.35, linewidth=0, label="GEOS spread")
+    na_points = [row for row in ibtracs_points if str(row.get("basin_name")) == "North Atlantic"]
+    times_obs, obs_curve = cumulative_ibtracs_from_points(na_points)
+    if len(times_obs):
+        ax.plot(times_obs, obs_curve, color=PLOT_BLACK, linestyle="--", linewidth=1.8, marker="s", markersize=3.0, label="IBTrACS")
+    setup_axis(ax, "Cumulative ACE")
+    ax.set_title(f"{args.focus_year} Sep+Oct Cumulative ACE", fontweight="bold")
+    ax.legend(frameon=False, fontsize=9)
+    ax.tick_params(axis="x", rotation=25)
+
+    fig.suptitle(f"North Atlantic {args.focus_year} Sep+Oct ACE Diagnostics", fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    out = plot_dir / f"{args.prefix}_{args.focus_year}_north_atlantic_sep_oct_diagnostics.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=args.dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> Saved {out}")
+    return summary_rows
 
 
 def plot_na_2020_diagnostics(
@@ -1009,6 +1331,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-lat", type=float, default=-25.0)
     parser.add_argument("--max-lat", type=float, default=50.0)
     parser.add_argument("--focus-year", type=int, default=2020)
+    parser.add_argument("--map-bin-size", type=float, default=5.0, help="Lat/lon bin size for focus-year count and ACE-difference maps.")
     parser.add_argument("--table-dir", default=DEFAULT_TABLE_DIR)
     parser.add_argument("--plot-dir", default=DEFAULT_PLOT_DIR)
     parser.add_argument("--prefix", default=DEFAULT_PREFIX)
@@ -1060,10 +1383,8 @@ def main() -> int:
     plot_metric_summary(skill, plot_dir / f"{args.prefix}_skill_metrics_by_basin.png", args.dpi)
     plot_north_atlantic_timeseries(yearly, plot_dir / f"{args.prefix}_north_atlantic_timeseries_spread.png", args.dpi)
     plot_na_scatter(yearly, plot_dir / f"{args.prefix}_north_atlantic_anomaly_scatter.png", args.dpi)
-    focus_rows = plot_na_2020_diagnostics(yearly_all, member_rows, lats, lons, grids_by_lead_year, args, plot_dir)
-    write_csv(table_dir / f"{args.prefix}_{args.focus_year}_north_atlantic_summary.csv", focus_rows, [
-        "year", "lead", "month", "basin_name", "geos_mean_ace", "geos_std_ace", "ibtracs_ace", "bias", "n_members",
-    ])
+    plot_anomaly_timeseries_by_basin(yearly, plot_dir / f"{args.prefix}_anomaly_timeseries_by_basin.png", args.dpi)
+
     focus_basin_rows = build_focus_year_sep_oct_basin_ace(member_rows, yearly_all, args.focus_year)
     write_csv(table_dir / f"{args.prefix}_{args.focus_year}_sep_oct_basin_ace.csv", focus_basin_rows, [
         "year", "months", "basin_name", "geos_mean_ace", "geos_std_ace", "ibtracs_ace", "bias", "ratio", "n_members",
@@ -1091,6 +1412,10 @@ def main() -> int:
             if int(row["year"]) == args.focus_year and str(row["basin_name"]) == "All Basins"
         }
     )
+    focus_rows = plot_na_focus_year_sep_oct_diagnostics(member_rows, ibtracs_points, focus_basin_rows, args, plot_dir)
+    write_csv(table_dir / f"{args.prefix}_{args.focus_year}_north_atlantic_sep_oct_summary.csv", focus_rows, [
+        "year", "lead", "month", "basin_name", "geos_mean_ace", "geos_std_ace", "ibtracs_ace", "bias", "n_members",
+    ])
     focus_count_rows = build_focus_year_count_rows(geos_points, ibtracs_points, args.focus_year, focus_member_ids)
     write_csv(table_dir / f"{args.prefix}_{args.focus_year}_sep_oct_geos_tc_points.csv", geos_points, [
         "source", "year", "lead", "month", "init_date", "ens", "member_id", "basin_name", "time", "lat", "lon",
@@ -1107,10 +1432,44 @@ def main() -> int:
         geos_points,
         ibtracs_points,
         focus_count_rows,
+        focus_member_ids,
         plot_dir / f"{args.prefix}_{args.focus_year}_sep_oct_tc_locations_counts.png",
         args.focus_year,
         args.min_lat,
         args.max_lat,
+        args.map_bin_size,
+        args.dpi,
+    )
+    lat_edges, lon_edges, geos_binned_ace, ibtracs_binned_ace, ace_diff = focus_year_binned_ace_difference(
+        geos_points,
+        ibtracs_points,
+        focus_member_ids,
+        args.min_lat,
+        args.max_lat,
+        args.map_bin_size,
+    )
+    write_csv(table_dir / f"{args.prefix}_{args.focus_year}_sep_oct_binned_ace_difference.csv", binned_grid_rows(
+        lat_edges,
+        lon_edges,
+        {
+            "geos_ace_mean_per_member": geos_binned_ace,
+            "ibtracs_ace": ibtracs_binned_ace,
+            "geos_minus_ibtracs_ace": ace_diff,
+        },
+    ), [
+        "lat", "lon", "geos_ace_mean_per_member", "ibtracs_ace", "geos_minus_ibtracs_ace",
+    ])
+    plot_focus_year_ace_difference_map(
+        lat_edges,
+        lon_edges,
+        geos_points,
+        ibtracs_points,
+        ace_diff,
+        plot_dir / f"{args.prefix}_{args.focus_year}_sep_oct_ace_difference_map.png",
+        args.focus_year,
+        args.min_lat,
+        args.max_lat,
+        args.map_bin_size,
         args.dpi,
     )
 
